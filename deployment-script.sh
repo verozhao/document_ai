@@ -235,7 +235,7 @@ main() {
     create_scheduler_job
     
     print_status "Deployment completed successfully!"
-    print_status "Your Document AI training pipeline is now set up and ready to use."
+    print_status "Document AI training pipeline is now set up and ready to use."
     print_status "Upload PDF documents to gs://$BUCKET_NAME/documents/ to start processing."
 }
 
