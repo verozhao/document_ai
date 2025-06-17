@@ -24,8 +24,6 @@ A fully automated system for Google Document AI processors that automatically pr
 - Automatic model deployment and version management
 - Live dashboard for system monitoring and health checks
 
-## Two modes of operation
-
 1. **Initial Training**:
    - Collects documents until threshold is met
    - Triggers first model training
@@ -53,7 +51,7 @@ chmod +x deployment-script.sh
 
 3. Upload PDFs to the GCS bucket:
 ```bash
-gsutil -m cp /Users/test/Downloads/test_documents/*.pdf gs://document-ai-test-veronica/documents/
+gsutil cp /Users/test/Downloads/test_documents/*.pdf gs://document-ai-test-veronica/documents/
 ```
 
 4. Configuration in Firestore

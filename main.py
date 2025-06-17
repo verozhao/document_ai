@@ -13,6 +13,7 @@ gcloud functions deploy document-ai-auto-trainer \
 
 import os
 import json
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
@@ -65,12 +66,14 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
         if not file_name.startswith('documents/') or not content_type == 'application/pdf':
             logger.info(f"Skipping non-document file: {file_name}")
             return {'status': 'skipped', 'reason': 'Not a document PDF'}
-        
-        # Extract document ID from filename
-        # Remove 'documents/' prefix and any file extension
-        document_id = file_name[10:]  # Remove 'documents/'
-        if '.' in document_id:
-            document_id = document_id.rsplit('.', 1)[0]
+
+        filename_only = os.path.basename(file_name)
+        name_without_ext = filename_only.rsplit('.', 1)[0] if '.' in filename_only else filename_only
+        file_hash = hashlib.md5(file_name.encode()).hexdigest()[:8]
+        # Replace spaces with underscores and ensure the name is safe
+        safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in name_without_ext.replace(' ', '_'))[:40]
+        document_id = f"{safe_name}_{file_hash}"
+        logger.info(f"Generated document ID: {document_id} for file: {file_name}")
         
         # Check if document already processed
         doc_ref = db.collection(FIRESTORE_COLLECTION).document(document_id)
