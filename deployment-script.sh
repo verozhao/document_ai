@@ -171,10 +171,10 @@ deploy_cloud_function() {
     # Create function directory
     mkdir -p cloud-function
     
-    # Copy the cloud function code
-    cat > cloud-function/main.py << 'EOF'
-# Insert the cloud function code here (from gcs-trigger-function artifact)
-EOF
+    # Do not overwrite main.py; assume user has already provided the correct code
+    # cat > cloud-function/main.py << 'EOF'
+    # # Insert the cloud function code here (from gcs-trigger-function artifact)
+    # EOF
     
     # Create requirements.txt
     cat > cloud-function/requirements.txt << EOF

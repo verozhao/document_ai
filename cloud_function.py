@@ -20,6 +20,7 @@ from typing import Dict, Any, Optional
 from google.cloud import documentai_v1 as documentai
 from google.cloud import firestore
 from google.cloud import workflows_v1
+from google.cloud.workflows import executions_v1
 from google.cloud import storage
 from google.api_core.client_options import ClientOptions
 
@@ -40,7 +41,7 @@ CONFIG_COLLECTION = 'training_configs'
 db = firestore.Client(project=PROJECT_ID)
 storage_client = storage.Client(project=PROJECT_ID)
 workflow_client = workflows_v1.WorkflowsClient()
-workflow_execution_client = workflows_v1.ExecutionsClient()
+workflow_execution_client = executions_v1.ExecutionsClient()
 
 # Document AI client
 opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
