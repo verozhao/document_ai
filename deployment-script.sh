@@ -1,5 +1,3 @@
-#!/bin/bash
-
 # Automated Document AI Training Pipeline Deployment Script
 # This script sets up the complete automated training pipeline
 
