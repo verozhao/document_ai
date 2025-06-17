@@ -1,0 +1,406 @@
+# Cloud Workflow for Document AI Automated Training
+# Deploy with:
+# gcloud workflows deploy document-ai-training-workflow \
+#   --source=training-workflow.yaml \
+#   --location=us-central1
+
+main:
+  params: [input]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - processor_id: ${input.processor_id}
+          - training_type: ${input.training_type}
+          - location: "us"
+          - processor_path: ${"projects/" + project_id + "/locations/" + location + "/processors/" + processor_id}
+          - batch_id: ${"batch_" + text.substring(sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"), 0, 12)}
+          - firestore_collection: "processed_documents"
+          - training_collection: "training_batches"
+          - start_time: ${sys.now()}
+
+    - log_start:
+        call: sys.log
+        args:
+          text: ${"Starting " + training_type + " training for processor " + processor_id}
+          severity: "INFO"
+
+    - create_training_batch:
+        call: googleapis.firestore.v1.projects.databases.documents.create
+        args:
+          parent: ${"projects/" + project_id + "/databases/(default)/documents"}
+          collectionId: ${training_collection}
+          documentId: ${batch_id}
+          body:
+            fields:
+              batch_id: 
+                stringValue: ${batch_id}
+              processor_id:
+                stringValue: ${processor_id}
+              training_type:
+                stringValue: ${training_type}
+              status:
+                stringValue: "preparing"
+              started_at:
+                timestampValue: ${time.format(sys.now())}
+              document_count:
+                integerValue: 0
+
+    - get_training_documents:
+        try:
+          steps:
+            - query_documents:
+                call: http.post
+                args:
+                  url: ${"https://firestore.googleapis.com/v1/projects/" + project_id + "/databases/(default)/documents:runQuery"}
+                  auth:
+                    type: OAuth2
+                  body:
+                    structuredQuery:
+                      from:
+                        - collectionId: ${firestore_collection}
+                      where:
+                        compositeFilter:
+                          op: "AND"
+                          filters:
+                            - fieldFilter:
+                                field:
+                                  fieldPath: "processor_id"
+                                op: "EQUAL"
+                                value:
+                                  stringValue: ${processor_id}
+                            - fieldFilter:
+                                field:
+                                  fieldPath: "status"
+                                op: "EQUAL"
+                                value:
+                                  stringValue: ${if(training_type == "initial", "pending_initial_training", "completed")}
+                            - fieldFilter:
+                                field:
+                                  fieldPath: "used_for_training"
+                                op: "EQUAL"
+                                value:
+                                  booleanValue: false
+                      limit: 100
+                result: query_result
+
+            - process_documents:
+                assign:
+                  - training_documents: []
+                  - document_types: {}
+                for:
+                  value: doc
+                  in: ${query_result}
+                  steps:
+                    - extract_doc_info:
+                        assign:
+                          - doc_id: ${doc.document.fields.document_id.stringValue}
+                          - gcs_uri: ${doc.document.fields.gcs_uri.stringValue}
+                          - doc_type: ${default(doc.document.fields.document_type.stringValue, "OTHER")}
+                          
+                    - append_document:
+                        assign:
+                          - training_documents: ${list.concat(training_documents, [{"gcs_uri": gcs_uri, "document_type": doc_type, "document_id": doc_id}])}
+                          
+                    - count_types:
+                        assign:
+                          - document_types[doc_type]: ${default(map.get(document_types, doc_type), 0) + 1}
+
+        except:
+          as: e
+          steps:
+            - log_error:
+                call: sys.log
+                args:
+                  text: ${"Error getting training documents: " + json.encode_to_string(e)}
+                  severity: "ERROR"
+            - fail_workflow:
+                raise: ${e}
+
+    - check_document_count:
+        switch:
+          - condition: ${len(training_documents) == 0}
+            steps:
+              - log_no_documents:
+                  call: sys.log
+                  args:
+                    text: "No documents found for training"
+                    severity: "WARNING"
+              - update_batch_cancelled:
+                  call: googleapis.firestore.v1.projects.databases.documents.patch
+                  args:
+                    name: ${"projects/" + project_id + "/databases/(default)/documents/" + training_collection + "/" + batch_id}
+                    updateMask:
+                      fieldPaths: ["status", "error_message"]
+                    body:
+                      fields:
+                        status:
+                          stringValue: "cancelled"
+                        error_message:
+                          stringValue: "No documents found for training"
+              - end_workflow:
+                  return: "No documents for training"
+
+    - update_batch_with_documents:
+        call: googleapis.firestore.v1.projects.databases.documents.patch
+        args:
+          name: ${"projects/" + project_id + "/databases/(default)/documents/" + training_collection + "/" + batch_id}
+          updateMask:
+            fieldPaths: ["status", "document_count", "document_type_counts", "document_ids"]
+          body:
+            fields:
+              status:
+                stringValue: "training"
+              document_count:
+                integerValue: ${len(training_documents)}
+              document_type_counts:
+                mapValue:
+                  fields: ${document_types}
+              document_ids:
+                arrayValue:
+                  values: ${list.map(training_documents, function(doc) doc.document_id)}
+
+    - start_training:
+        try:
+          steps:
+            - prepare_training_request:
+                assign:
+                  - model_display_name: ${"auto-train-" + text.substring(batch_id, 6, 12) + "-" + time.format(sys.now(), "UTC", "%Y%m%d")}
+                  - training_gcs_documents: []
+                for:
+                  value: doc
+                  in: ${training_documents}
+                  steps:
+                    - add_gcs_document:
+                        assign:
+                          - training_gcs_documents: ${list.concat(training_gcs_documents, [{"gcs_uri": doc.gcs_uri, "mime_type": "application/pdf"}])}
+
+            - call_document_ai_training:
+                call: googleapis.documentai.v1.projects.locations.processors.processorVersions.train
+                args:
+                  parent: ${processor_path}
+                  body:
+                    processorVersion:
+                      displayName: ${model_display_name}
+                    documentSchema:
+                      entityTypes: ${create_entity_types(document_types)}
+                    inputData:
+                      trainingDocuments:
+                        gcsDocuments:
+                          documents: ${training_gcs_documents}
+                result: training_operation
+
+            - update_batch_training_started:
+                call: googleapis.firestore.v1.projects.databases.documents.patch
+                args:
+                  name: ${"projects/" + project_id + "/databases/(default)/documents/" + training_collection + "/" + batch_id}
+                  updateMask:
+                    fieldPaths: ["training_operation_id", "model_display_name"]
+                  body:
+                    fields:
+                      training_operation_id:
+                        stringValue: ${training_operation.name}
+                      model_display_name:
+                        stringValue: ${model_display_name}
+
+        except:
+          as: e
+          steps:
+            - log_training_error:
+                call: sys.log
+                args:
+                  text: ${"Error starting training: " + json.encode_to_string(e)}
+                  severity: "ERROR"
+            - update_batch_failed:
+                call: googleapis.firestore.v1.projects.databases.documents.patch
+                args:
+                  name: ${"projects/" + project_id + "/databases/(default)/documents/" + training_collection + "/" + batch_id}
+                  updateMask:
+                    fieldPaths: ["status", "error_message", "completed_at"]
+                  body:
+                    fields:
+                      status:
+                        stringValue: "failed"
+                      error_message:
+                        stringValue: ${json.encode_to_string(e)}
+                      completed_at:
+                        timestampValue: ${time.format(sys.now())}
+            - raise_error:
+                raise: ${e}
+
+    - wait_for_training:
+        parallel:
+          branches:
+            - monitor_training:
+                steps:
+                  - poll_operation:
+                      call: googleapis.documentai.v1.projects.locations.operations.get
+                      args:
+                        name: ${training_operation.name}
+                      result: operation_status
+                      
+                  - check_completion:
+                      switch:
+                        - condition: ${operation_status.done == true}
+                          next: training_complete
+                          
+                  - wait:
+                      call: sys.sleep
+                      args:
+                        seconds: 60
+                        
+                  - loop_check:
+                      next: poll_operation
+                      
+                  - training_complete:
+                      assign:
+                        - training_result: ${operation_status}
+
+            - timeout_guard:
+                steps:
+                  - wait_timeout:
+                      call: sys.sleep
+                      args:
+                        seconds: 7200  # 2 hour timeout
+                  - timeout_reached:
+                      raise:
+                        message: "Training operation timed out after 2 hours"
+
+    - check_training_result:
+        switch:
+          - condition: ${training_result.error != null}
+            steps:
+              - log_training_failed:
+                  call: sys.log
+                  args:
+                    text: ${"Training failed: " + json.encode_to_string(training_result.error)}
+                    severity: "ERROR"
+              - update_batch_training_failed:
+                  call: googleapis.firestore.v1.projects.databases.documents.patch
+                  args:
+                    name: ${"projects/" + project_id + "/databases/(default)/documents/" + training_collection + "/" + batch_id}
+                    updateMask:
+                      fieldPaths: ["status", "error_message", "completed_at"]
+                    body:
+                      fields:
+                        status:
+                          stringValue: "training_failed"
+                        error_message:
+                          stringValue: ${json.encode_to_string(training_result.error)}
+                        completed_at:
+                          timestampValue: ${time.format(sys.now())}
+              - end_failed:
+                  return: "Training failed"
+
+    - deploy_model:
+        try:
+          steps:
+            - get_processor_version:
+                assign:
+                  - processor_version_name: ${training_result.response.name}
+                  
+            - deploy_processor_version:
+                call: googleapis.documentai.v1.projects.locations.processors.processorVersions.deploy
+                args:
+                  name: ${processor_version_name}
+                result: deploy_operation
+                
+            - update_batch_deploying:
+                call: googleapis.firestore.v1.projects.databases.documents.patch
+                args:
+                  name: ${"projects/" + project_id + "/databases/(default)/documents/" + training_collection + "/" + batch_id}
+                  updateMask:
+                    fieldPaths: ["status", "deploy_operation_id", "processor_version_name"]
+                  body:
+                    fields:
+                      status:
+                        stringValue: "deploying"
+                      deploy_operation_id:
+                        stringValue: ${deploy_operation.name}
+                      processor_version_name:
+                        stringValue: ${processor_version_name}
+
+            - wait_for_deployment:
+                call: sys.sleep
+                args:
+                  seconds: 300  # Wait 5 minutes for deployment
+
+            - set_as_default:
+                call: googleapis.documentai.v1.projects.locations.processors.setDefaultProcessorVersion
+                args:
+                  processor: ${processor_path}
+                  body:
+                    defaultProcessorVersion: ${processor_version_name}
+
+        except:
+          as: e
+          steps:
+            - log_deployment_error:
+                call: sys.log
+                args:
+                  text: ${"Error deploying model: " + json.encode_to_string(e)}
+                  severity: "ERROR"
+
+    - mark_documents_as_used:
+        parallel:
+          for:
+            value: doc
+            in: ${training_documents}
+            steps:
+              - update_document:
+                  call: googleapis.firestore.v1.projects.databases.documents.patch
+                  args:
+                    name: ${"projects/" + project_id + "/databases/(default)/documents/" + firestore_collection + "/" + doc.document_id}
+                    updateMask:
+                      fieldPaths: ["used_for_training", "training_batch_id"]
+                    body:
+                      fields:
+                        used_for_training:
+                          booleanValue: true
+                        training_batch_id:
+                          stringValue: ${batch_id}
+
+    - finalize_batch:
+        call: googleapis.firestore.v1.projects.databases.documents.patch
+        args:
+          name: ${"projects/" + project_id + "/databases/(default)/documents/" + training_collection + "/" + batch_id}
+          updateMask:
+            fieldPaths: ["status", "completed_at", "deployed_at"]
+          body:
+            fields:
+              status:
+                stringValue: "deployed"
+              completed_at:
+                timestampValue: ${time.format(sys.now())}
+              deployed_at:
+                timestampValue: ${time.format(sys.now())}
+
+    - log_success:
+        call: sys.log
+        args:
+          text: ${"Successfully completed training and deployment for batch " + batch_id}
+          severity: "INFO"
+
+    - return_success:
+        return:
+          batch_id: ${batch_id}
+          status: "success"
+          documents_trained: ${len(training_documents)}
+          duration_seconds: ${int(sys.now() - start_time)}
+
+# Helper function to create entity types for document schema
+create_entity_types:
+  params: [document_types]
+  steps:
+    - build_entities:
+        assign:
+          - entities: []
+        for:
+          value: doc_type
+          in: ${keys(document_types)}
+          steps:
+            - add_entity:
+                assign:
+                  - entities: ${list.concat(entities, [{"type_": doc_type, "display_name": text.replace_all(doc_type, "_", " ")}])}
+    - return_entities:
+        return: ${entities}
