@@ -6,15 +6,15 @@
 set -e
 
 # Configuration
-PROJECT_ID="${GCP_PROJECT_ID:-}"
-PROCESSOR_ID="${DOCUMENT_AI_PROCESSOR_ID:-}"
+PROJECT_ID="${GCP_PROJECT_ID:-tetrix-462721}"
+PROCESSOR_ID="${DOCUMENT_AI_PROCESSOR_ID:-ddc065df69bfa3b5}"
 DOCAI_LOCATION="us"  # Document AI processor location
 STORAGE_LOCATION="us"  # Cloud Storage location (multi-region)
 CLOUD_LOCATION="us-central1"  # Location for other cloud services (Functions, Workflows, etc.)
 FUNCTION_LOCATION="us-east1"  # Cloud Function location (closest to us multi-region)
-BUCKET_NAME="${GCS_BUCKET_NAME:-${PROJECT_ID}-document-ai}"
+BUCKET_NAME="${GCS_BUCKET_NAME:-document-ai-test-veronica}"
 FUNCTION_NAME="document-ai-auto-trainer"
-WORKFLOW_NAME="document-ai-training-workflow"
+WORKFLOW_NAME="workflow-1-veronica"
 SCHEDULER_JOB_NAME="document-ai-training-scheduler"
 
 # Colors for output
@@ -168,16 +168,8 @@ setup_firestore() {
 deploy_cloud_function() {
     print_status "Deploying Cloud Function..."
     
-    # Create function directory
-    mkdir -p cloud-function
-    
-    # Do not overwrite main.py; assume user has already provided the correct code
-    # cat > cloud-function/main.py << 'EOF'
-    # # Insert the cloud function code here (from gcs-trigger-function artifact)
-    # EOF
-    
-    # Create requirements.txt
-    cat > cloud-function/requirements.txt << EOF
+    # Ensure requirements.txt exists with correct dependencies
+    cat > requirements.txt << EOF
 google-cloud-documentai==2.20.0
 google-cloud-firestore==2.13.1
 google-cloud-workflows==1.12.1
@@ -190,121 +182,50 @@ EOF
         --trigger-resource $BUCKET_NAME \
         --trigger-event google.storage.object.finalize \
         --entry-point process_document_upload \
-        --source cloud-function \
+        --source . \
         --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID,DOCUMENT_AI_PROCESSOR_ID=$PROCESSOR_ID,DOCUMENT_AI_LOCATION=$DOCAI_LOCATION,WORKFLOW_NAME=$WORKFLOW_NAME" \
         --memory 512MB \
         --timeout 540s \
         --region $FUNCTION_LOCATION \
         --no-gen2
     
-    # Clean up
-    rm -rf cloud-function
-    
     print_status "Cloud Function deployed successfully"
 }
 
-# Deploy Cloud Workflow
+# Deploy Workflow
 deploy_workflow() {
-    print_status "Deploying Cloud Workflow..."
+    print_status "Deploying Workflow..."
     
-    gcloud workflows deploy $WORKFLOW_NAME \
-        --location=$CLOUD_LOCATION \
-        --source=training-workflow.yaml \
-        --service-account="${PROJECT_ID}@appspot.gserviceaccount.com"
-    
-    print_status "Cloud Workflow deployed successfully"
+    if [ -f "training-workflow.yaml" ]; then
+        gcloud workflows deploy $WORKFLOW_NAME \
+            --source=training-workflow.yaml \
+            --location=us-central1
+        print_status "Workflow deployed successfully"
+    else
+        print_error "training-workflow.yaml not found"
+        exit 1
+    fi
 }
 
-# Create Cloud Scheduler job for periodic checks
+# Create Cloud Scheduler job
 create_scheduler_job() {
     print_status "Creating Cloud Scheduler job..."
     
-    # Create App Engine app if it doesn't exist (required for Cloud Scheduler)
-    if ! gcloud app describe &> /dev/null; then
-        print_status "Creating App Engine app..."
-        gcloud app create --region=$CLOUD_LOCATION
-    fi
-    
-    # Create or update scheduler job
     if gcloud scheduler jobs describe $SCHEDULER_JOB_NAME --location=$CLOUD_LOCATION &> /dev/null; then
-        gcloud scheduler jobs delete $SCHEDULER_JOB_NAME --location=$CLOUD_LOCATION --quiet
+        print_warning "Scheduler job $SCHEDULER_JOB_NAME already exists"
+    else
+        gcloud scheduler jobs create pubsub $SCHEDULER_JOB_NAME \
+            --schedule="0 */6 * * *" \
+            --topic=document-ai-training \
+            --message-body="{\"action\":\"check_training\"}" \
+            --location=$CLOUD_LOCATION
+        print_status "Created scheduler job: $SCHEDULER_JOB_NAME"
     fi
-    
-    gcloud scheduler jobs create pubsub $SCHEDULER_JOB_NAME \
-        --location=$CLOUD_LOCATION \
-        --schedule="0 */6 * * *" \
-        --topic=document-ai-training \
-        --message-body='{"action":"periodic_check","processor_id":"'$PROCESSOR_ID'"}' \
-        --time-zone="UTC"
-    
-    print_status "Cloud Scheduler job created"
 }
 
-# Set up IAM permissions
-setup_iam_permissions() {
-    print_status "Setting up IAM permissions..."
-    
-    # Get the default service account
-    SERVICE_ACCOUNT="${PROJECT_ID}@appspot.gserviceaccount.com"
-    
-    # Grant necessary roles
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SERVICE_ACCOUNT" \
-        --role="roles/documentai.editor"
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SERVICE_ACCOUNT" \
-        --role="roles/storage.admin"
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SERVICE_ACCOUNT" \
-        --role="roles/datastore.user"
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SERVICE_ACCOUNT" \
-        --role="roles/workflows.invoker"
-    
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SERVICE_ACCOUNT" \
-        --role="roles/pubsub.publisher"
-    
-    print_status "IAM permissions configured"
-}
-
-# Create initial training configuration
-create_initial_config() {
-    print_status "Creating initial training configuration..."
-    
-    # Create a Python script to initialize Firestore config
-    cat > init_config.py << EOF
-from google.cloud import firestore
-import os
-
-db = firestore.Client(project=os.environ['PROJECT_ID'])
-
-# Create default training configuration
-config_ref = db.collection('training_configs').document(os.environ['PROCESSOR_ID'])
-config_ref.set({
-    'enabled': True,
-    'min_documents_for_initial_training': 10,
-    'min_documents_for_incremental': 5,
-    'min_accuracy_for_deployment': 0.8,
-    'check_interval_minutes': 360,
-    'created_at': firestore.SERVER_TIMESTAMP
-})
-
-print("Initial configuration created")
-EOF
-    
-    PROJECT_ID=$PROJECT_ID PROCESSOR_ID=$PROCESSOR_ID python3 init_config.py
-    rm init_config.py
-    
-    print_status "Initial configuration created"
-}
-
-# Main deployment function
+# Main deployment process
 main() {
-    print_status "Starting Document AI Automated Training Pipeline deployment..."
+    print_status "Starting deployment process..."
     
     check_prerequisites
     enable_apis
@@ -314,25 +235,10 @@ main() {
     deploy_cloud_function
     deploy_workflow
     create_scheduler_job
-    setup_iam_permissions
-    create_initial_config
     
-    print_status "=========================================="
     print_status "Deployment completed successfully!"
-    print_status "=========================================="
-    print_status ""
-    print_status "Next steps:"
-    print_status "1. Upload PDF documents to: gs://$BUCKET_NAME/documents/"
-    print_status "2. Documents will be automatically processed and used for training"
-    print_status "3. Training will trigger automatically when thresholds are met"
-    print_status "4. Monitor progress in Cloud Console:"
-    print_status "   - Cloud Functions: https://console.cloud.google.com/functions"
-    print_status "   - Workflows: https://console.cloud.google.com/workflows"
-    print_status "   - Firestore: https://console.cloud.google.com/firestore"
-    print_status ""
-    print_status "To upload documents:"
-    print_status "  gsutil cp your-document.pdf gs://$BUCKET_NAME/documents/"
-    print_status ""
+    print_status "Your Document AI training pipeline is now set up and ready to use."
+    print_status "Upload PDF documents to gs://$BUCKET_NAME/documents/ to start processing."
 }
 
 # Run main function

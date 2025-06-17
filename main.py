@@ -19,10 +19,10 @@ from typing import Dict, Any, Optional
 
 from google.cloud import documentai_v1 as documentai
 from google.cloud import firestore
-from google.cloud import workflows_v1
-from google.cloud.workflows import executions_v1
 from google.cloud import storage
 from google.api_core.client_options import ClientOptions
+from google.cloud.workflows.executions_v1 import ExecutionsClient
+from google.cloud.workflows_v1 import WorkflowsClient
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ID = os.environ.get('GCP_PROJECT_ID')
 PROCESSOR_ID = os.environ.get('DOCUMENT_AI_PROCESSOR_ID')
 LOCATION = os.environ.get('DOCUMENT_AI_LOCATION', 'us')
-WORKFLOW_NAME = os.environ.get('WORKFLOW_NAME', 'document-ai-training-workflow')
+WORKFLOW_NAME = os.environ.get('WORKFLOW_NAME', 'workflow-1-veronica')
 FIRESTORE_COLLECTION = 'processed_documents'
 TRAINING_COLLECTION = 'training_batches'
 CONFIG_COLLECTION = 'training_configs'
@@ -40,8 +40,8 @@ CONFIG_COLLECTION = 'training_configs'
 # Initialize clients
 db = firestore.Client(project=PROJECT_ID)
 storage_client = storage.Client(project=PROJECT_ID)
-workflow_client = workflows_v1.WorkflowsClient()
-workflow_execution_client = executions_v1.ExecutionsClient()
+workflow_client = WorkflowsClient()
+workflow_execution_client = ExecutionsClient()
 
 # Document AI client
 opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
