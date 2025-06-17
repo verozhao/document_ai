@@ -2,7 +2,7 @@
 # Deploy with:
 # gcloud workflows deploy document-ai-training-workflow \
 #   --source=training-workflow.yaml \
-#   --location=us-central1
+#   --location=us
 
 main:
   params: [input]

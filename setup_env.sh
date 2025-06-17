@@ -4,6 +4,6 @@ export GOOGLE_APPLICATION_CREDENTIALS="/Users/test/Downloads/tetrix-462721-71bf6
 export PDF_DIRECTORY="/Users/test/Downloads/test_documents"
 export GCS_BUCKET_NAME="document-ai-test-veronica"
 
-export LOCATION='us-central1'
+export LOCATION='us'
 export WORKFLOW_NAME='workflow-1-veronica'
 export FIRESTORE_COLLECTION='processed_documents'

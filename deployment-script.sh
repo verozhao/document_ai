@@ -8,8 +8,10 @@ set -e
 # Configuration
 PROJECT_ID="${GCP_PROJECT_ID:-}"
 PROCESSOR_ID="${DOCUMENT_AI_PROCESSOR_ID:-}"
-LOCATION="${DOCUMENT_AI_LOCATION:-us}"
-FUNCTION_LOCATION="us-central1"  # Separate location for Cloud Function
+DOCAI_LOCATION="us"  # Document AI processor location
+STORAGE_LOCATION="us"  # Cloud Storage location (multi-region)
+CLOUD_LOCATION="us-central1"  # Location for other cloud services (Functions, Workflows, etc.)
+FUNCTION_LOCATION="us-east1"  # Cloud Function location (closest to us multi-region)
 BUCKET_NAME="${GCS_BUCKET_NAME:-${PROJECT_ID}-document-ai}"
 FUNCTION_NAME="document-ai-auto-trainer"
 WORKFLOW_NAME="document-ai-training-workflow"
@@ -89,7 +91,7 @@ create_storage_bucket() {
     if gsutil ls -b gs://$BUCKET_NAME &> /dev/null; then
         print_warning "Bucket $BUCKET_NAME already exists"
     else
-        gsutil mb -p $PROJECT_ID -c STANDARD -l $LOCATION gs://$BUCKET_NAME
+        gsutil mb -p $PROJECT_ID -c STANDARD -l $STORAGE_LOCATION gs://$BUCKET_NAME
         print_status "Created bucket: gs://$BUCKET_NAME"
     fi
     
@@ -125,7 +127,7 @@ setup_firestore() {
     
     # Create Firestore database if it doesn't exist
     if ! gcloud firestore databases list --format="value(name)" | grep -q "projects/$PROJECT_ID/databases/(default)"; then
-        gcloud firestore databases create --location=$LOCATION
+        gcloud firestore databases create --location=$CLOUD_LOCATION
         print_status "Created Firestore database"
     else
         print_warning "Firestore database already exists"
@@ -189,10 +191,11 @@ EOF
         --trigger-event google.storage.object.finalize \
         --entry-point process_document_upload \
         --source cloud-function \
-        --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID,DOCUMENT_AI_PROCESSOR_ID=$PROCESSOR_ID,DOCUMENT_AI_LOCATION=$LOCATION,WORKFLOW_NAME=$WORKFLOW_NAME" \
+        --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID,DOCUMENT_AI_PROCESSOR_ID=$PROCESSOR_ID,DOCUMENT_AI_LOCATION=$DOCAI_LOCATION,WORKFLOW_NAME=$WORKFLOW_NAME" \
         --memory 512MB \
         --timeout 540s \
-        --region $FUNCTION_LOCATION
+        --region $FUNCTION_LOCATION \
+        --no-gen2
     
     # Clean up
     rm -rf cloud-function
@@ -204,11 +207,8 @@ EOF
 deploy_workflow() {
     print_status "Deploying Cloud Workflow..."
     
-    # The workflow YAML should be saved to a file
-    # For this example, we'll assume it's in training-workflow.yaml
-    
     gcloud workflows deploy $WORKFLOW_NAME \
-        --location=$LOCATION \
+        --location=$CLOUD_LOCATION \
         --source=training-workflow.yaml \
         --service-account="${PROJECT_ID}@appspot.gserviceaccount.com"
     
@@ -222,16 +222,16 @@ create_scheduler_job() {
     # Create App Engine app if it doesn't exist (required for Cloud Scheduler)
     if ! gcloud app describe &> /dev/null; then
         print_status "Creating App Engine app..."
-        gcloud app create --region=$LOCATION
+        gcloud app create --region=$CLOUD_LOCATION
     fi
     
     # Create or update scheduler job
-    if gcloud scheduler jobs describe $SCHEDULER_JOB_NAME --location=$FUNCTION_LOCATION &> /dev/null; then
-        gcloud scheduler jobs delete $SCHEDULER_JOB_NAME --location=$FUNCTION_LOCATION --quiet
+    if gcloud scheduler jobs describe $SCHEDULER_JOB_NAME --location=$CLOUD_LOCATION &> /dev/null; then
+        gcloud scheduler jobs delete $SCHEDULER_JOB_NAME --location=$CLOUD_LOCATION --quiet
     fi
     
     gcloud scheduler jobs create pubsub $SCHEDULER_JOB_NAME \
-        --location=$FUNCTION_LOCATION \
+        --location=$CLOUD_LOCATION \
         --schedule="0 */6 * * *" \
         --topic=document-ai-training \
         --message-body='{"action":"periodic_check","processor_id":"'$PROCESSOR_ID'"}' \
