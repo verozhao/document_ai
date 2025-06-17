@@ -17,14 +17,26 @@ A fully automated system for Google Document AI processors that automatically pr
                         └─────────────┘           └──────────────┘
 ```
 
-## Key Features
+## Key features
 
 - GCS-triggered document processing and training
 - Automatic initial and incremental training based on document thresholds
 - Automatic model deployment and version management
 - Live dashboard for system monitoring and health checks
 
-## Quick Start
+## Two modes of operation
+
+1. **Initial Training**:
+   - Collects documents until threshold is met
+   - Triggers first model training
+   - Deploys initial model
+
+2. **Incremental Training**:
+   - Processes new documents with current model
+   - Triggers retraining when threshold reached
+   - Deploys new version if accuracy improves
+
+## Usage
 
 1. Set up environment:
 ```bash
@@ -39,30 +51,17 @@ chmod +x deployment-script.sh
 ./deployment-script.sh
 ```
 
-## Usage
-Upload PDFs to the GCS bucket:
+3. Upload PDFs to the GCS bucket:
 ```bash
-gsutil cp invoice.pdf gs://${GCS_BUCKET_NAME}/documents/
+gsutil cp invoice.pdf gs://document-ai-test-veronica/documents/
 ```
-Run the monitoring dashboard:
+4. Run the monitoring dashboard:
 ```bash
 python monitoring_dashboard.py
 ```
 
-Configuration in Firestore
+5. Configuration in Firestore
 - `min_documents_for_initial_training`: 10 (default)
 - `min_documents_for_incremental`: 5 (default)
 - `min_accuracy_for_deployment`: 0.8 (default)
 - `check_interval_minutes`: 360 (default)
-
-## How It Works
-
-1. **Initial Training**:
-   - Collects documents until threshold is met
-   - Triggers first model training
-   - Deploys initial model
-
-2. **Incremental Training**:
-   - Processes new documents with current model
-   - Triggers retraining when threshold reached
-   - Deploys new version if accuracy improves
