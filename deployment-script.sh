@@ -8,7 +8,8 @@ set -e
 # Configuration
 PROJECT_ID="${GCP_PROJECT_ID:-}"
 PROCESSOR_ID="${DOCUMENT_AI_PROCESSOR_ID:-}"
-LOCATION="${DOCUMENT_AI_LOCATION:-us-central1}"
+LOCATION="${DOCUMENT_AI_LOCATION:-us}"
+FUNCTION_LOCATION="us-central1"  # Separate location for Cloud Function
 BUCKET_NAME="${GCS_BUCKET_NAME:-${PROJECT_ID}-document-ai}"
 FUNCTION_NAME="document-ai-auto-trainer"
 WORKFLOW_NAME="document-ai-training-workflow"
@@ -50,6 +51,12 @@ check_prerequisites() {
     # Check if gcloud is installed
     if ! command -v gcloud &> /dev/null; then
         print_error "gcloud CLI is not installed"
+        exit 1
+    fi
+    
+    # Check if jq is installed
+    if ! command -v jq &> /dev/null; then
+        print_error "jq is not installed. Please install it first: brew install jq"
         exit 1
     fi
     
@@ -117,41 +124,40 @@ setup_firestore() {
     print_status "Setting up Firestore..."
     
     # Create Firestore database if it doesn't exist
-    if ! gcloud firestore databases describe --database="(default)" &> /dev/null; then
+    if ! gcloud firestore databases list --format="value(name)" | grep -q "projects/$PROJECT_ID/databases/(default)"; then
         gcloud firestore databases create --location=$LOCATION
         print_status "Created Firestore database"
     else
         print_warning "Firestore database already exists"
     fi
     
-    # Create composite indexes
-    cat > firestore.indexes.json << EOF
-{
-  "indexes": [
-    {
-      "collectionGroup": "processed_documents",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "processor_id", "order": "ASCENDING" },
-        { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "used_for_training", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "training_batches",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "processor_id", "order": "ASCENDING" },
-        { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "started_at", "order": "DESCENDING" }
-      ]
-    }
-  ]
-}
-EOF
+    # Create composite indexes for processed_documents
+    print_status "Creating Firestore indexes..."
     
-    gcloud firestore indexes create --file=firestore.indexes.json
-    rm firestore.indexes.json
+    # Function to create index with error handling
+    create_index() {
+        local collection=$1
+        shift
+        local fields=("$@")
+        local field_configs=""
+        for field in "${fields[@]}"; do
+            field_configs="$field_configs --field-config field-path=$field,order=ASCENDING"
+        done
+        
+        if gcloud firestore indexes composite create \
+            --collection-group=$collection \
+            --query-scope=COLLECTION \
+            $field_configs 2>/dev/null; then
+            print_status "Created index for $collection on ${fields[*]}"
+        else
+            print_warning "Index for $collection on ${fields[*]} already exists"
+        fi
+    }
+    
+    # Create indexes
+    create_index "processed_documents" "processor_id" "status" "created_at"
+    create_index "processed_documents" "processor_id" "used_for_training"
+    create_index "training_configs" "processor_id" "enabled"
     
     print_status "Firestore setup completed"
 }
@@ -186,7 +192,7 @@ EOF
         --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID,DOCUMENT_AI_PROCESSOR_ID=$PROCESSOR_ID,DOCUMENT_AI_LOCATION=$LOCATION,WORKFLOW_NAME=$WORKFLOW_NAME" \
         --memory 512MB \
         --timeout 540s \
-        --region $LOCATION
+        --region $FUNCTION_LOCATION
     
     # Clean up
     rm -rf cloud-function
@@ -220,12 +226,12 @@ create_scheduler_job() {
     fi
     
     # Create or update scheduler job
-    if gcloud scheduler jobs describe $SCHEDULER_JOB_NAME --location=$LOCATION &> /dev/null; then
-        gcloud scheduler jobs delete $SCHEDULER_JOB_NAME --location=$LOCATION --quiet
+    if gcloud scheduler jobs describe $SCHEDULER_JOB_NAME --location=$FUNCTION_LOCATION &> /dev/null; then
+        gcloud scheduler jobs delete $SCHEDULER_JOB_NAME --location=$FUNCTION_LOCATION --quiet
     fi
     
     gcloud scheduler jobs create pubsub $SCHEDULER_JOB_NAME \
-        --location=$LOCATION \
+        --location=$FUNCTION_LOCATION \
         --schedule="0 */6 * * *" \
         --topic=document-ai-training \
         --message-body='{"action":"periodic_check","processor_id":"'$PROCESSOR_ID'"}' \

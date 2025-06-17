@@ -54,13 +54,14 @@ This system provides **fully automated incremental training** for Google Documen
 ### Environment Setup
 
 ```bash
-./setup_env.sh
+chmod +x setup_env.sh
+source setup_env.sh
 ```
 
 ### One-Command Deployment
 
 ```bash
-curl -O https://raw.githubusercontent.com/your-repo/deployment-script.sh
+curl -O https://raw.githubusercontent.com/document-ai/deployment-script.sh
 chmod +x deployment-script.sh
 ./deployment-script.sh
 ```

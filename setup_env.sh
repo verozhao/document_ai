@@ -6,4 +6,4 @@ export GCS_BUCKET_NAME="document-ai-test-veronica"
 
 export LOCATION='us-central1'
 export WORKFLOW_NAME='workflow-1-veronica'
-export FIRESTORE_COLLECTION = 'processed_documents'
+export FIRESTORE_COLLECTION='processed_documents'

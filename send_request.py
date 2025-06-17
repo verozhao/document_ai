@@ -28,7 +28,7 @@ PDF_DIRECTORY="/Users/test/Downloads/test_documents"
 GCS_BUCKET_NAME="document-ai-test-veronica"
 
 
-LOCATION='us-central1'
+LOCATION='us'
 WORKFLOW_NAME='workflow-1-veronica'
 FIRESTORE_COLLECTION = 'processed_documents'
 
