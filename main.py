@@ -21,8 +21,8 @@ from google.cloud import documentai_v1 as documentai
 from google.cloud import firestore
 from google.cloud import storage
 from google.api_core.client_options import ClientOptions
-from google.cloud.workflows.executions_v1 import ExecutionsClient
-from google.cloud.workflows_v1 import WorkflowsClient
+from google.cloud.workflows import executions_v1
+from google.cloud.workflows.executions_v1 import Execution
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,6 +33,7 @@ PROJECT_ID = os.environ.get('GCP_PROJECT_ID')
 PROCESSOR_ID = os.environ.get('DOCUMENT_AI_PROCESSOR_ID')
 LOCATION = os.environ.get('DOCUMENT_AI_LOCATION', 'us')
 WORKFLOW_NAME = os.environ.get('WORKFLOW_NAME', 'workflow-1-veronica')
+WORKFLOW_LOCATION = 'us-central1'  # Workflows are in us-central1
 FIRESTORE_COLLECTION = 'processed_documents'
 TRAINING_COLLECTION = 'training_batches'
 CONFIG_COLLECTION = 'training_configs'
@@ -40,8 +41,7 @@ CONFIG_COLLECTION = 'training_configs'
 # Initialize clients
 db = firestore.Client(project=PROJECT_ID)
 storage_client = storage.Client(project=PROJECT_ID)
-workflow_client = WorkflowsClient()
-workflow_execution_client = ExecutionsClient()
+workflow_execution_client = executions_v1.ExecutionsClient()
 
 # Document AI client
 opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
@@ -66,16 +66,21 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
             logger.info(f"Skipping non-document file: {file_name}")
             return {'status': 'skipped', 'reason': 'Not a document PDF'}
         
+        # Extract document ID from filename
+        # Remove 'documents/' prefix and any file extension
+        document_id = file_name[10:]  # Remove 'documents/'
+        if '.' in document_id:
+            document_id = document_id.rsplit('.', 1)[0]
+        
         # Check if document already processed
-        doc_ref = db.collection(FIRESTORE_COLLECTION).document(file_name)
+        doc_ref = db.collection(FIRESTORE_COLLECTION).document(document_id)
         existing_doc = doc_ref.get()
         
         if existing_doc.exists and existing_doc.to_dict().get('status') == 'completed':
-            logger.info(f"Document already processed: {file_name}")
+            logger.info(f"Document already processed: {document_id}")
             return {'status': 'skipped', 'reason': 'Already processed'}
         
         # Create document record
-        document_id = file_name.replace('/', '_').replace('.pdf', '')
         gcs_uri = f"gs://{bucket_name}/{file_name}"
         
         doc_data = {
@@ -95,6 +100,7 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
         
         if has_trained_version:
             # Process document immediately
+            logger.info("Processing document with trained model")
             result = process_with_document_ai(gcs_uri, processor_path)
             
             doc_data.update({
@@ -104,6 +110,7 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
                 'processed_at': datetime.now(timezone.utc),
                 'extracted_data': result.get('extracted_data', {})
             })
+            logger.info(f"Document processed - Type: {result.get('document_type')}, Confidence: {result.get('confidence')}")
         else:
             # Store for initial training
             logger.info("No trained version available - storing for initial training")
@@ -111,19 +118,29 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
         
         # Save document record
         doc_ref.set(doc_data)
+        logger.info(f"Document record saved: {document_id}")
         
         # Check if we should trigger training
         should_train, training_type = check_training_conditions()
         
         if should_train:
             logger.info(f"Triggering {training_type} training")
-            trigger_training_workflow(training_type)
-            return {
-                'status': 'success',
-                'document_id': document_id,
-                'training_triggered': True,
-                'training_type': training_type
-            }
+            try:
+                trigger_training_workflow(training_type)
+                return {
+                    'status': 'success',
+                    'document_id': document_id,
+                    'training_triggered': True,
+                    'training_type': training_type
+                }
+            except Exception as e:
+                logger.error(f"Failed to trigger workflow: {str(e)}")
+                return {
+                    'status': 'partial_success',
+                    'document_id': document_id,
+                    'training_triggered': False,
+                    'error': f"Workflow trigger failed: {str(e)}"
+                }
         
         return {
             'status': 'success',
@@ -132,7 +149,7 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
         }
         
     except Exception as e:
-        logger.error(f"Error processing document: {str(e)}")
+        logger.error(f"Error processing document: {str(e)}", exc_info=True)
         return {
             'status': 'error',
             'error': str(e)
@@ -145,10 +162,13 @@ def check_processor_versions(processor_path: str) -> bool:
         request = documentai.ListProcessorVersionsRequest(parent=processor_path)
         versions = docai_client.list_processor_versions(request=request)
         
+        has_deployed = False
         for version in versions:
+            logger.info(f"Found processor version: {version.display_name} - State: {version.state.name}")
             if version.state == documentai.ProcessorVersion.State.DEPLOYED:
-                return True
-        return False
+                has_deployed = True
+        
+        return has_deployed
     except Exception as e:
         logger.error(f"Error checking processor versions: {str(e)}")
         return False
@@ -160,6 +180,8 @@ def process_with_document_ai(gcs_uri: str, processor_path: str) -> Dict[str, Any
         # Get the default processor version
         processor = docai_client.get_processor(name=processor_path)
         processor_name = processor.default_processor_version or processor_path
+        
+        logger.info(f"Using processor version: {processor_name}")
         
         # Read document from GCS
         bucket_name = gcs_uri.split('/')[2]
@@ -224,28 +246,31 @@ def check_training_conditions() -> tuple[bool, str]:
         config_doc = config_ref.get()
         
         if not config_doc.exists:
-            # Create default config
+            # Create default config with LOWER thresholds for testing
             default_config = {
                 'enabled': True,
-                'min_documents_for_initial_training': 10,
-                'min_documents_for_incremental': 5,
+                'min_documents_for_initial_training': 3,  # Lowered from 10
+                'min_documents_for_incremental': 2,       # Lowered from 5
                 'min_accuracy_for_deployment': 0.7,
                 'check_interval_minutes': 60,
                 'created_at': datetime.now(timezone.utc)
             }
             config_ref.set(default_config)
             config = default_config
+            logger.info(f"Created default config with thresholds: initial={default_config['min_documents_for_initial_training']}, incremental={default_config['min_documents_for_incremental']}")
         else:
             config = config_doc.to_dict()
+            logger.info(f"Using existing config with thresholds: initial={config.get('min_documents_for_initial_training')}, incremental={config.get('min_documents_for_incremental')}")
         
         if not config.get('enabled', True):
+            logger.info("Training is disabled in configuration")
             return False, ''
         
         # Check for active training
         active_training = db.collection(TRAINING_COLLECTION).where(
             'processor_id', '==', PROCESSOR_ID
         ).where(
-            'status', 'in', ['pending', 'training', 'deploying']
+            'status', 'in', ['pending', 'preparing', 'training', 'deploying']
         ).limit(1).get()
         
         if active_training:
@@ -253,47 +278,62 @@ def check_training_conditions() -> tuple[bool, str]:
             return False, ''
         
         # Count documents by status
-        pending_initial = db.collection(FIRESTORE_COLLECTION).where(
+        pending_initial = list(db.collection(FIRESTORE_COLLECTION).where(
             'processor_id', '==', PROCESSOR_ID
         ).where(
             'status', '==', 'pending_initial_training'
-        ).get()
+        ).get())
         
-        unused_completed = db.collection(FIRESTORE_COLLECTION).where(
+        unused_completed = list(db.collection(FIRESTORE_COLLECTION).where(
             'processor_id', '==', PROCESSOR_ID
         ).where(
             'status', '==', 'completed'
         ).where(
             'used_for_training', '==', False
-        ).get()
+        ).get())
         
         pending_count = len(pending_initial)
         unused_count = len(unused_completed)
         
-        logger.info(f"Training check - Pending: {pending_count}, Unused completed: {unused_count}")
+        logger.info(f"Training check - Pending initial: {pending_count}, Unused completed: {unused_count}")
+        
+        # Log document IDs for debugging
+        if pending_count > 0:
+            logger.info(f"Pending initial training documents: {[doc.id for doc in pending_initial[:5]]}")
+        if unused_count > 0:
+            logger.info(f"Unused completed documents: {[doc.id for doc in unused_completed[:5]]}")
         
         # Check for initial training
-        if pending_count >= config.get('min_documents_for_initial_training', 10):
+        min_initial = config.get('min_documents_for_initial_training', 3)
+        if pending_count >= min_initial:
+            logger.info(f"Initial training threshold met: {pending_count} >= {min_initial}")
             return True, 'initial'
+        elif pending_count > 0:
+            logger.info(f"Initial training threshold NOT met: {pending_count} < {min_initial}")
         
         # Check for incremental training
-        if unused_count >= config.get('min_documents_for_incremental', 5):
+        min_incremental = config.get('min_documents_for_incremental', 2)
+        if unused_count >= min_incremental:
+            logger.info(f"Incremental training threshold met: {unused_count} >= {min_incremental}")
             return True, 'incremental'
+        elif unused_count > 0:
+            logger.info(f"Incremental training threshold NOT met: {unused_count} < {min_incremental}")
         
         return False, ''
         
     except Exception as e:
-        logger.error(f"Error checking training conditions: {str(e)}")
+        logger.error(f"Error checking training conditions: {str(e)}", exc_info=True)
         return False, ''
 
 
 def trigger_training_workflow(training_type: str):
     """Trigger the training workflow."""
     try:
-        # Create workflow execution
-        parent = workflow_client.workflow_path(PROJECT_ID, LOCATION, WORKFLOW_NAME)
+        # Construct the parent path correctly
+        parent = f"projects/{PROJECT_ID}/locations/{WORKFLOW_LOCATION}/workflows/{WORKFLOW_NAME}"
         
-        execution = workflows_v1.Execution(
+        # Create execution request
+        execution = Execution(
             argument=json.dumps({
                 'processor_id': PROCESSOR_ID,
                 'training_type': training_type,
@@ -301,94 +341,17 @@ def trigger_training_workflow(training_type: str):
             })
         )
         
-        response = workflow_execution_client.create_execution(
+        # Create execution
+        request = executions_v1.CreateExecutionRequest(
             parent=parent,
             execution=execution
         )
         
+        response = workflow_execution_client.create_execution(request=request)
+        
         logger.info(f"Started workflow execution: {response.name}")
+        logger.info(f"Workflow state: {response.state.name}")
         
     except Exception as e:
-        logger.error(f"Error triggering workflow: {str(e)}")
+        logger.error(f"Error triggering workflow: {str(e)}", exc_info=True)
         raise
-
-
-# Additional helper functions for batch processing
-def create_batch_training_job(training_docs: list) -> str:
-    """
-    Create a batch training job using Document AI's batch processing.
-    """
-    try:
-        processor_path = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{PROCESSOR_ID}"
-        
-        # Create processor version for training
-        model_display_name = f"auto-train-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        
-        # Get document labels from Firestore
-        labeled_documents = []
-        for doc in training_docs:
-            doc_data = doc.to_dict()
-            labeled_documents.append({
-                'gcs_uri': doc_data['gcs_uri'],
-                'document_type': doc_data.get('document_type', 'OTHER')
-            })
-        
-        # Create training request
-        processor_version = documentai.ProcessorVersion(
-            display_name=model_display_name
-        )
-        
-        # Prepare training documents
-        training_gcs_documents = [
-            documentai.Document(
-                uri=doc['gcs_uri'],
-                type_=doc['document_type']
-            )
-            for doc in labeled_documents
-        ]
-        
-        request = documentai.TrainProcessorVersionRequest(
-            parent=processor_path,
-            processor_version=processor_version,
-            document_schema=create_document_schema(labeled_documents),
-            input_data=documentai.TrainProcessorVersionRequest.InputData(
-                training_documents=documentai.BatchDocumentsInputConfig(
-                    gcs_documents=documentai.GcsDocuments(
-                        documents=[
-                            documentai.GcsDocument(
-                                gcs_uri=doc['gcs_uri'],
-                                mime_type="application/pdf"
-                            )
-                            for doc in labeled_documents
-                        ]
-                    )
-                )
-            )
-        )
-        
-        # Start training
-        operation = docai_client.train_processor_version(request=request)
-        
-        logger.info(f"Started training operation: {operation.name}")
-        return operation.name
-        
-    except Exception as e:
-        logger.error(f"Error creating batch training job: {str(e)}")
-        raise
-
-
-def create_document_schema(labeled_documents: list) -> documentai.DocumentSchema:
-    """Create document schema for training."""
-    schema = documentai.DocumentSchema()
-    
-    # Get unique document types
-    doc_types = set(doc['document_type'] for doc in labeled_documents)
-    
-    for doc_type in doc_types:
-        entity_type = documentai.DocumentSchema.EntityType(
-            type_=doc_type,
-            display_name=doc_type.replace('_', ' ').title()
-        )
-        schema.entity_types.append(entity_type)
-    
-    return schema

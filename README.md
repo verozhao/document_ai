@@ -53,14 +53,10 @@ chmod +x deployment-script.sh
 
 3. Upload PDFs to the GCS bucket:
 ```bash
-gsutil cp invoice.pdf gs://document-ai-test-veronica/documents/
-```
-4. Run the monitoring dashboard:
-```bash
-python monitoring_dashboard.py
+gsutil -m cp /Users/test/Downloads/test_documents/*.pdf gs://document-ai-test-veronica/documents/
 ```
 
-5. Configuration in Firestore
+4. Configuration in Firestore
 - `min_documents_for_initial_training`: 10 (default)
 - `min_documents_for_incremental`: 5 (default)
 - `min_accuracy_for_deployment`: 0.8 (default)

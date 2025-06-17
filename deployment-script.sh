@@ -8,10 +8,10 @@ set -e
 # Configuration
 PROJECT_ID="${GCP_PROJECT_ID:-tetrix-462721}"
 PROCESSOR_ID="${DOCUMENT_AI_PROCESSOR_ID:-ddc065df69bfa3b5}"
-DOCAI_LOCATION="us"  # Document AI processor location
-STORAGE_LOCATION="us"  # Cloud Storage location (multi-region)
-CLOUD_LOCATION="us-central1"  # Location for other cloud services (Functions, Workflows, etc.)
-FUNCTION_LOCATION="us-east1"  # Cloud Function location (closest to us multi-region)
+DOCAI_LOCATION="us"  # Location for Document AI processor
+STORAGE_LOCATION="us"  # Location for Cloud Storage
+CLOUD_LOCATION="us-central1"  # Location for Functions and Workflows
+FUNCTION_LOCATION="us-east1"
 BUCKET_NAME="${GCS_BUCKET_NAME:-document-ai-test-veronica}"
 FUNCTION_NAME="document-ai-auto-trainer"
 WORKFLOW_NAME="workflow-1-veronica"
