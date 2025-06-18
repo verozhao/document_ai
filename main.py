@@ -1,14 +1,6 @@
 """
 Google Cloud Function that triggers on GCS uploads to automatically process documents
 and initiate incremental training when thresholds are met.
-
-Deploy with:
-gcloud functions deploy document-ai-auto-trainer \
-    --runtime python39 \
-    --trigger-resource YOUR_BUCKET_NAME \
-    --trigger-event google.storage.object.finalize \
-    --entry-point process_document_upload \
-    --set-env-vars GCP_PROJECT_ID=YOUR_PROJECT,DOCUMENT_AI_PROCESSOR_ID=YOUR_PROCESSOR_ID
 """
 
 import os
@@ -16,7 +8,7 @@ import json
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from google.cloud import documentai_v1 as documentai
 from google.cloud import firestore
@@ -25,9 +17,6 @@ from google.api_core.client_options import ClientOptions
 from google.cloud.workflows import executions_v1
 from google.cloud.workflows.executions_v1 import Execution
 import functions_framework
-from flask import Request
-from batch_processing import process_new_document as process_doc
-from training_trigger import check_training_trigger as check_training
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -38,10 +27,8 @@ PROJECT_ID = os.environ.get('GCP_PROJECT_ID')
 PROCESSOR_ID = os.environ.get('DOCUMENT_AI_PROCESSOR_ID')
 LOCATION = os.environ.get('DOCUMENT_AI_LOCATION', 'us')
 WORKFLOW_NAME = os.environ.get('WORKFLOW_NAME', 'workflow-1-veronica')
-WORKFLOW_LOCATION = 'us-central1'  # Workflows are in us-central1
-FIRESTORE_COLLECTION = 'processed_documents'
-TRAINING_COLLECTION = 'training_batches'
-CONFIG_COLLECTION = 'training_configs'
+WORKFLOW_LOCATION = 'us-central1'
+BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', 'document-ai-test-veronica')
 
 # Initialize clients
 db = firestore.Client(project=PROJECT_ID)
@@ -51,6 +38,15 @@ workflow_execution_client = executions_v1.ExecutionsClient()
 # Document AI client
 opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
 docai_client = documentai.DocumentProcessorServiceClient(client_options=opts)
+
+# Document type keywords for auto-labeling
+DOCUMENT_TYPE_KEYWORDS = {
+    'CAPITAL_CALL': ['capital call', 'drawdown', 'commitment', 'capital contribution'],
+    'DISTRIBUTION_NOTICE': ['distribution', 'proceeds', 'realized', 'dividend'],
+    'FINANCIAL_STATEMENT': ['balance sheet', 'income statement', 'financial statement', 'profit loss'],
+    'PORTFOLIO_SUMMARY': ['portfolio', 'holdings', 'investments', 'asset allocation'],
+    'TAX': ['tax', 'k-1', 'schedule k', '1099', '1040'],
+}
 
 
 def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -71,16 +67,15 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
             logger.info(f"Skipping non-document file: {file_name}")
             return {'status': 'skipped', 'reason': 'Not a document PDF'}
 
+        # Generate unique document ID
         filename_only = os.path.basename(file_name)
         name_without_ext = filename_only.rsplit('.', 1)[0] if '.' in filename_only else filename_only
         file_hash = hashlib.md5(file_name.encode()).hexdigest()[:8]
-        # Replace spaces with underscores and ensure the name is safe
         safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in name_without_ext.replace(' ', '_'))[:40]
         document_id = f"{safe_name}_{file_hash}"
-        logger.info(f"Generated document ID: {document_id} for file: {file_name}")
         
         # Check if document already processed
-        doc_ref = db.collection(FIRESTORE_COLLECTION).document(document_id)
+        doc_ref = db.collection('processed_documents').document(document_id)
         existing_doc = doc_ref.get()
         
         if existing_doc.exists and existing_doc.to_dict().get('status') == 'completed':
@@ -90,6 +85,9 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
         # Create document record
         gcs_uri = f"gs://{bucket_name}/{file_name}"
         
+        # Auto-label document based on filename or content
+        document_label = auto_label_document(file_name, gcs_uri)
+        
         doc_data = {
             'document_id': document_id,
             'gcs_uri': gcs_uri,
@@ -97,6 +95,7 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
             'file_name': file_name,
             'processor_id': PROCESSOR_ID,
             'status': 'pending',
+            'document_label': document_label,  # Important: Store the label for training
             'created_at': datetime.now(timezone.utc),
             'used_for_training': False
         }
@@ -110,14 +109,24 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
             logger.info("Processing document with trained model")
             result = process_with_document_ai(gcs_uri, processor_path)
             
+            # Update document type based on prediction
+            predicted_type = result.get('document_type', 'OTHER')
+            confidence = result.get('confidence', 0.0)
+            
+            # If confidence is low, keep the auto-label for retraining
+            if confidence < 0.7 and document_label != 'OTHER':
+                logger.info(f"Low confidence prediction ({confidence}), keeping auto-label: {document_label}")
+            else:
+                document_label = predicted_type
+            
             doc_data.update({
                 'status': 'completed',
-                'document_type': result.get('document_type', 'OTHER'),
-                'confidence_score': result.get('confidence', 0.0),
+                'document_type': predicted_type,
+                'document_label': document_label,  # This is what will be used for training
+                'confidence_score': confidence,
                 'processed_at': datetime.now(timezone.utc),
                 'extracted_data': result.get('extracted_data', {})
             })
-            logger.info(f"Document processed - Type: {result.get('document_type')}, Confidence: {result.get('confidence')}")
         else:
             # Store for initial training
             logger.info("No trained version available - storing for initial training")
@@ -125,7 +134,7 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
         
         # Save document record
         doc_ref.set(doc_data)
-        logger.info(f"Document record saved: {document_id}")
+        logger.info(f"Document saved with label: {document_label}")
         
         # Check if we should trigger training
         should_train, training_type = check_training_conditions()
@@ -137,6 +146,7 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
                 return {
                     'status': 'success',
                     'document_id': document_id,
+                    'document_label': document_label,
                     'training_triggered': True,
                     'training_type': training_type
                 }
@@ -152,6 +162,7 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
         return {
             'status': 'success',
             'document_id': document_id,
+            'document_label': document_label,
             'training_triggered': False
         }
         
@@ -161,6 +172,33 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
             'status': 'error',
             'error': str(e)
         }
+
+
+def auto_label_document(file_name: str, gcs_uri: str) -> str:
+    """
+    Auto-label document based on subfolder name.
+    The subfolder name is used as the document label.
+    """
+    # Extract subfolder name from the file path
+    # Example: documents/CAPITAL_CALL/doc1.pdf -> CAPITAL_CALL
+    path_parts = file_name.split('/')
+    if len(path_parts) > 2:  # Check if file is in a subfolder
+        subfolder = path_parts[1]  # Get the subfolder name
+        # Convert to uppercase and replace spaces with underscores
+        label = subfolder.upper().replace(' ', '_')
+        logger.info(f"Auto-labeled document as {label} based on subfolder")
+        return label
+    
+    # If no subfolder found, try to determine from filename
+    file_name_lower = file_name.lower()
+    for doc_type, keywords in DOCUMENT_TYPE_KEYWORDS.items():
+        if any(keyword in file_name_lower for keyword in keywords):
+            logger.info(f"Auto-labeled document as {doc_type} based on filename")
+            return doc_type
+    
+    # Default to OTHER if no label can be determined
+    logger.info("Could not determine document type, labeled as OTHER")
+    return 'OTHER'
 
 
 def check_processor_versions(processor_path: str) -> bool:
@@ -188,8 +226,6 @@ def process_with_document_ai(gcs_uri: str, processor_path: str) -> Dict[str, Any
         processor = docai_client.get_processor(name=processor_path)
         processor_name = processor.default_processor_version or processor_path
         
-        logger.info(f"Using processor version: {processor_name}")
-        
         # Read document from GCS
         bucket_name = gcs_uri.split('/')[2]
         blob_name = '/'.join(gcs_uri.split('/')[3:])
@@ -214,11 +250,19 @@ def process_with_document_ai(gcs_uri: str, processor_path: str) -> Dict[str, Any
         confidence = 0.0
         
         if result.document.entities:
+            # For custom classifiers, the entity type is the document class
             for entity in result.document.entities:
                 if entity.type_:
-                    document_type = entity.type_.upper().replace(' ', '_')
+                    document_type = entity.type_
                     confidence = entity.confidence
                     break
+        
+        # Also check for labels in the document
+        if hasattr(result.document, 'labels') and result.document.labels:
+            for label in result.document.labels:
+                if label.confidence > confidence:
+                    document_type = label.name
+                    confidence = label.confidence
         
         return {
             'document_type': document_type,
@@ -242,39 +286,37 @@ def process_with_document_ai(gcs_uri: str, processor_path: str) -> Dict[str, Any
         raise
 
 
-def check_training_conditions() -> tuple[bool, str]:
+def check_training_conditions() -> Tuple[bool, str]:
     """
     Check if training conditions are met.
     Returns (should_train, training_type)
     """
     try:
         # Get training configuration
-        config_ref = db.collection(CONFIG_COLLECTION).document(PROCESSOR_ID)
+        config_ref = db.collection('training_configs').document(PROCESSOR_ID)
         config_doc = config_ref.get()
         
         if not config_doc.exists:
-            # Create default config with LOWER thresholds for testing
+            # Create default config
             default_config = {
                 'enabled': True,
-                'min_documents_for_initial_training': 3,  # Lowered from 10
-                'min_documents_for_incremental': 2,       # Lowered from 5
-                'min_accuracy_for_deployment': 0.7,
+                'min_documents_for_initial_training': 3,
+                'min_documents_for_incremental': 2,
+                'min_accuracy_for_deployment': 0,
                 'check_interval_minutes': 60,
                 'created_at': datetime.now(timezone.utc)
             }
             config_ref.set(default_config)
             config = default_config
-            logger.info(f"Created default config with thresholds: initial={default_config['min_documents_for_initial_training']}, incremental={default_config['min_documents_for_incremental']}")
         else:
             config = config_doc.to_dict()
-            logger.info(f"Using existing config with thresholds: initial={config.get('min_documents_for_initial_training')}, incremental={config.get('min_documents_for_incremental')}")
         
         if not config.get('enabled', True):
             logger.info("Training is disabled in configuration")
             return False, ''
         
         # Check for active training
-        active_training = db.collection(TRAINING_COLLECTION).where(
+        active_training = db.collection('training_batches').where(
             'processor_id', '==', PROCESSOR_ID
         ).where(
             'status', 'in', ['pending', 'preparing', 'training', 'deploying']
@@ -284,47 +326,59 @@ def check_training_conditions() -> tuple[bool, str]:
             logger.info("Active training already in progress")
             return False, ''
         
-        # Count documents by status
-        pending_initial = list(db.collection(FIRESTORE_COLLECTION).where(
+        # Count documents by status with proper labels
+        pending_initial_query = db.collection('processed_documents').where(
             'processor_id', '==', PROCESSOR_ID
         ).where(
             'status', '==', 'pending_initial_training'
-        ).get())
+        ).where(
+            'document_label', '!=', None  # Must have a label
+        )
         
-        unused_completed = list(db.collection(FIRESTORE_COLLECTION).where(
+        unused_completed_query = db.collection('processed_documents').where(
             'processor_id', '==', PROCESSOR_ID
         ).where(
             'status', '==', 'completed'
         ).where(
             'used_for_training', '==', False
-        ).get())
+        ).where(
+            'document_label', '!=', None  # Must have a label
+        )
+        
+        pending_initial = list(pending_initial_query.get())
+        unused_completed = list(unused_completed_query.get())
         
         pending_count = len(pending_initial)
         unused_count = len(unused_completed)
         
-        logger.info(f"Training check - Pending initial: {pending_count}, Unused completed: {unused_count}")
+        logger.info(f"Training check - Labeled pending initial: {pending_count}, Labeled unused completed: {unused_count}")
         
-        # Log document IDs for debugging
+        # Check label distribution
         if pending_count > 0:
-            logger.info(f"Pending initial training documents: {[doc.id for doc in pending_initial[:5]]}")
+            label_dist = {}
+            for doc in pending_initial:
+                label = doc.to_dict().get('document_label', 'OTHER')
+                label_dist[label] = label_dist.get(label, 0) + 1
+            logger.info(f"Initial training label distribution: {label_dist}")
+        
         if unused_count > 0:
-            logger.info(f"Unused completed documents: {[doc.id for doc in unused_completed[:5]]}")
+            label_dist = {}
+            for doc in unused_completed:
+                label = doc.to_dict().get('document_label', 'OTHER')
+                label_dist[label] = label_dist.get(label, 0) + 1
+            logger.info(f"Incremental training label distribution: {label_dist}")
         
         # Check for initial training
         min_initial = config.get('min_documents_for_initial_training', 3)
         if pending_count >= min_initial:
             logger.info(f"Initial training threshold met: {pending_count} >= {min_initial}")
             return True, 'initial'
-        elif pending_count > 0:
-            logger.info(f"Initial training threshold NOT met: {pending_count} < {min_initial}")
         
         # Check for incremental training
         min_incremental = config.get('min_documents_for_incremental', 2)
         if unused_count >= min_incremental:
             logger.info(f"Incremental training threshold met: {unused_count} >= {min_incremental}")
             return True, 'incremental'
-        elif unused_count > 0:
-            logger.info(f"Incremental training threshold NOT met: {unused_count} < {min_incremental}")
         
         return False, ''
         
@@ -336,7 +390,6 @@ def check_training_conditions() -> tuple[bool, str]:
 def trigger_training_workflow(training_type: str):
     """Trigger the training workflow."""
     try:
-        # Construct the parent path correctly
         parent = f"projects/{PROJECT_ID}/locations/{WORKFLOW_LOCATION}/workflows/{WORKFLOW_NAME}"
         
         # Create execution request
@@ -344,11 +397,12 @@ def trigger_training_workflow(training_type: str):
             argument=json.dumps({
                 'processor_id': PROCESSOR_ID,
                 'training_type': training_type,
-                'triggered_at': datetime.now(timezone.utc).isoformat()
+                'triggered_at': datetime.now(timezone.utc).isoformat(),
+                'bucket_name': BUCKET_NAME,
+                'location': LOCATION
             })
         )
         
-        # Create execution
         request = executions_v1.CreateExecutionRequest(
             parent=parent,
             execution=execution
@@ -362,13 +416,3 @@ def trigger_training_workflow(training_type: str):
     except Exception as e:
         logger.error(f"Error triggering workflow: {str(e)}", exc_info=True)
         raise
-
-@functions_framework.http
-def process_new_document(request: Request):
-    """Entry point for document processing function."""
-    return process_doc(request)
-
-@functions_framework.http
-def check_training_trigger(request: Request):
-    """Entry point for training trigger function."""
-    return check_training(request)

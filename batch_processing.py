@@ -16,16 +16,12 @@ from flask import Request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# TODO(developer): Uncomment these variables before running the sample.
+# Configuration from environment
 project_id = "tetrix-462721"
-location = "us" # Format is "us" or "eu"
-processor_id = "ddc065df69bfa3b5" # Create processor before running sample
-gcs_output_uri = "gs://document-ai-test-veronica/output/" # Updated bucket
-# processor_version_id = "YOUR_PROCESSOR_VERSION_ID" # Optional. Example: pretrained-ocr-v1.0-2020-09-23
-
-# TODO(developer): You must specify either `gcs_input_uri` and `mime_type` or `gcs_input_prefix`
-gcs_input_prefix = "gs://document-ai-test-veronica/documents/" # Updated bucket
-# field_mask = "text,entities,pages.pageNumber"  # Optional. The fields to return in the Document object.
+location = "us" 
+processor_id = "ddc065df69bfa3b5"
+gcs_output_uri = "gs://document-ai-test-veronica/output/"
+gcs_input_prefix = "gs://document-ai-test-veronica/documents/"
 
 # Configuration
 topic_name = "document-ai-training-trigger"
@@ -60,44 +56,6 @@ def get_mime_type(file_name: str) -> str:
     else:
         logger.warning(f"Unsupported or unknown MIME type for {file_name}, defaulting to PDF")
         return "application/pdf"
-
-def enable_processor_training():
-    """Enable automatic training for the processor."""
-    try:
-        opts = ClientOptions(api_endpoint=f"{location}-documentai.googleapis.com")
-        client = documentai.DocumentProcessorServiceClient(client_options=opts)
-        
-        processor_path = client.processor_path(project_id, location, processor_id)
-        logger.info(f"Processor path: {processor_path}")
-        
-        # Configure processor for automatic training
-        processor = documentai.Processor(
-            name=processor_path,
-            display_name="Auto-training Processor",
-            type_="CUSTOM_CLASSIFIER",
-            state="ENABLED",
-            process_options=documentai.ProcessOptions(
-                ocr_config=documentai.OcrConfig(
-                    enable_native_pdf_parsing=True,
-                    enable_image_quality_scores=True,
-                ),
-                auto_training=True,  # Enable automatic training
-                auto_training_min_document_count=1,  # Minimum documents before training
-                auto_training_confidence_threshold=0,  # Confidence threshold for training
-            )
-        )
-        
-        request = documentai.UpdateProcessorRequest(
-            processor=processor,
-            update_mask={"paths": ["process_options"]}
-        )
-        
-        response = client.update_processor(request)
-        logger.info(f"Processor updated successfully: {response}")
-        return response
-    except Exception as e:
-        logger.error(f"Error enabling processor training: {str(e)}")
-        raise
 
 @functions_framework.http
 def process_new_document(request: Request):
@@ -263,9 +221,11 @@ def batch_process_documents(
 
                 # Log the document text and any classification results
                 logger.info("Document processing results:")
-                logger.info(f"Text: {document.text}")
-                if hasattr(document, 'entities'):
-                    logger.info(f"Entities: {document.entities}")
+                logger.info(f"Text: {document.text[:500]}...")  # First 500 chars
+                if hasattr(document, 'entities') and document.entities:
+                    logger.info(f"Entities found: {len(document.entities)}")
+                    for entity in document.entities[:5]:  # First 5 entities
+                        logger.info(f"  - Type: {entity.type_}, Text: {entity.mention_text}, Confidence: {entity.confidence}")
                 if hasattr(document, 'pages'):
                     logger.info(f"Number of pages: {len(document.pages)}")
 
@@ -274,6 +234,4 @@ def batch_process_documents(
         raise
 
 if __name__ == "__main__":
-    # Enable automatic training when script is run
-    enable_processor_training()
-    logger.info("Automatic training has been enabled for the processor.")
+    logger.info("Batch processing module ready for Document AI operations.")
