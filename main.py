@@ -24,6 +24,10 @@ from google.cloud import storage
 from google.api_core.client_options import ClientOptions
 from google.cloud.workflows import executions_v1
 from google.cloud.workflows.executions_v1 import Execution
+import functions_framework
+from flask import Request
+from batch_processing import process_new_document as process_doc
+from training_trigger import check_training_trigger as check_training
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -358,3 +362,13 @@ def trigger_training_workflow(training_type: str):
     except Exception as e:
         logger.error(f"Error triggering workflow: {str(e)}", exc_info=True)
         raise
+
+@functions_framework.http
+def process_new_document(request: Request):
+    """Entry point for document processing function."""
+    return process_doc(request)
+
+@functions_framework.http
+def check_training_trigger(request: Request):
+    """Entry point for training trigger function."""
+    return check_training(request)
