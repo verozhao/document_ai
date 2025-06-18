@@ -20,7 +20,7 @@ PROCESSOR_ID = os.environ.get('DOCUMENT_AI_PROCESSOR_ID', 'ddc065df69bfa3b5')
 LOCATION = os.environ.get('DOCUMENT_AI_LOCATION', 'us')
 BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', 'document-ai-test-veronica')
 WORKFLOW_NAME = 'workflow-1-veronica'
-FUNCTION_NAME = 'document-ai-auto-trainer'
+FUNCTION_NAME = 'document-ai-service'
 
 print(f"=== Document AI Training Pipeline Debugger ===")
 print(f"Project ID: {PROJECT_ID}")
