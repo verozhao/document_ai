@@ -82,12 +82,12 @@ async def upload_document(
             
             try:
                 # Upload and process
-                response = await client.upload_and_process_document(
-                    document_path=tmp_file.name,
-                    document_name=doc_name,
-                    expected_type=expected_type,
-                    mime_type=file.content_type,
-                )
+                response = await client.upload_document_for_training(
+                file_path=tmp_file.name,
+                document_name=doc_name,
+                expected_type=expected_type,
+                process_immediately=True  # This triggers immediate processing
+            )
                 
                 return response
                 

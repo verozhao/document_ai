@@ -12,7 +12,7 @@ export WORKFLOW_LOCATION='us-central1'
 export FIRESTORE_COLLECTION='processed_documents'
 
 # Function configuration  
-export FUNCTION_NAME='document-ai-auto-trainer'
+export FUNCTION_NAME='document-ai-service'
 export FUNCTION_REGION='us-central1'
 
 # Training configuration

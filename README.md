@@ -51,7 +51,7 @@ chmod +x deployment-script.sh
 
 3. Upload PDFs to the GCS bucket:
 ```bash
-gsutil cp /Users/test/Downloads/test_documents/*.pdf gs://document-ai-test-veronica/documents/
+gsutil -m cp -r /Users/test/Downloads/test_documents_v2/* gs://document-ai-test-veronica/documents/
 ```
 
 4. Configuration in Firestore

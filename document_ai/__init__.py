@@ -13,7 +13,7 @@ from .models import (
 )
 
 # Training components
-from .incremental_training import IncrementalTrainingManager
+from .incremental_training import AutomatedTrainingManager
 
 # API
 from .api import router as document_ai_router
@@ -30,7 +30,7 @@ __all__ = [
     'AutomatedTrainingConfig',
     
     # Training
-    'IncrementalTrainingManager',
+    'AutomatedTrainingManager',
     
     # API
     'document_ai_router',

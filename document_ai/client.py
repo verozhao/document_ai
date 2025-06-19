@@ -213,6 +213,20 @@ class EnhancedDocumentAIClient:
                 message=f"Error: {str(e)}",
                 training_triggered=False,
             )
+    async def upload_and_process_document(
+        self,
+        document_path: str,
+        document_name: str,
+        expected_type: Optional[DocumentType] = None,
+        mime_type: str = "application/pdf"
+    ) -> DocumentUploadResponse:
+        """Upload and immediately process a document."""
+        return await self.upload_document_for_training(
+            file_path=document_path,
+            document_name=document_name,
+            expected_type=expected_type,
+            process_immediately=True
+        )
 
     async def _process_document_immediately(
         self,
