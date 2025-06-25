@@ -181,15 +181,11 @@ class AutomatedTrainingManager:
         try:
             logger.info(f"Processing training batch {batch_id} with {len(training_documents)} documents")
             
-            # Create document schema
-            schema = self._create_document_schema(training_documents)
-            
             # Prepare training request
             model_display_name = f"auto-train-{batch_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             
             processor_version = documentai.ProcessorVersion(
                 display_name=model_display_name,
-                document_schema=schema
             )
             
             # Create training documents config
@@ -214,7 +210,6 @@ class AutomatedTrainingManager:
             request = documentai.TrainProcessorVersionRequest(
                 parent=self.processor_path,
                 processor_version=processor_version,
-                document_schema=schema,
                 input_data=input_config,
                 base_processor_version=base_version
             )
@@ -247,56 +242,6 @@ class AutomatedTrainingManager:
                 'timestamp': datetime.now(timezone.utc).isoformat()
             })
             raise
-
-    def _create_document_schema(self, training_documents: List[Dict[str, Any]]) -> documentai.DocumentSchema:
-        """Create document schema for training based on document types."""
-        schema = documentai.DocumentSchema()
-        
-        # Get unique document types
-        doc_types = set()
-        for doc in training_documents:
-            doc_type = doc.get('document_type', 'OTHER')
-            doc_types.add(doc_type)
-        
-        # Create entity types
-        for doc_type in doc_types:
-            entity_type = documentai.DocumentSchema.EntityType(
-                type_=doc_type,
-                display_name=doc_type.replace('_', ' ').title(),
-                base_types=["document"]
-            )
-            
-            # Add properties based on document type
-            if doc_type == "CAPITAL_CALL":
-                entity_type.properties.extend([
-                    documentai.DocumentSchema.EntityType.Property(
-                        name="call_amount",
-                        display_name="Call Amount",
-                        value_type="money"
-                    ),
-                    documentai.DocumentSchema.EntityType.Property(
-                        name="due_date",
-                        display_name="Due Date",
-                        value_type="datetime"
-                    )
-                ])
-            elif doc_type == "FINANCIAL_STATEMENT":
-                entity_type.properties.extend([
-                    documentai.DocumentSchema.EntityType.Property(
-                        name="total_assets",
-                        display_name="Total Assets",
-                        value_type="money"
-                    ),
-                    documentai.DocumentSchema.EntityType.Property(
-                        name="total_liabilities",
-                        display_name="Total Liabilities",
-                        value_type="money"
-                    )
-                ])
-            
-            schema.entity_types.append(entity_type)
-        
-        return schema
 
     async def _get_latest_deployed_version(self) -> Optional[str]:
         """Get the latest deployed processor version."""

@@ -40,6 +40,24 @@ workflow_execution_client = executions_v1.ExecutionsClient()
 opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
 docai_client = documentai.DocumentProcessorServiceClient(client_options=opts)
 
+# Allowed document labels based on current GCS subfolders
+ALLOWED_DOCUMENT_LABELS = [
+    'capital_call',
+    'distribution_notice',
+    'financial_statement_and_pcap',
+    'financial_statement',
+    'investment_overview',
+    'investor_memos',
+    'investor_presentation',
+    'investor_statement',
+    'legal',
+    'management_commentary',
+    'pcap_statement',
+    'portfolio_summary_and_pcap',
+    'portfolio_summary',
+    'tax',
+]
+
 # The following serves as a fallback for auto-labeling. It is not used in the current implementation.
 # If the file is not in a subfolder (e.g., just documents/doc1.pdf), the function then tries to infer the label from the filename itself by searching for keywords defined in DOCUMENT_TYPE_KEYWORDS.
 # DOCUMENT_TYPE_KEYWORDS = {
@@ -185,25 +203,16 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
 def auto_label_document(file_name: str, gcs_uri: str) -> str:
     """
     Auto-label document based on subfolder name.
-    The subfolder name is used as the document label. If no subfolder, returns 'OTHER'.
+    Only returns the label if it is in ALLOWED_DOCUMENT_LABELS. Otherwise, returns 'OTHER'.
     """
-    # Extract subfolder name from the file path
     path_parts = file_name.split('/')
-    if len(path_parts) > 2:  # Check if file is in a subfolder
-        subfolder = path_parts[1]  # Get the subfolder name
-        # Use exact folder name, just replace spaces with underscores
-        label = subfolder.replace(' ', '_')
-        logger.info(f"Auto-labeled document as {label} based on subfolder")
-        return label
-    
-    # # If no subfolder found, try to determine from filename
-    # file_name_lower = file_name.lower()
-    # for doc_type, keywords in DOCUMENT_TYPE_KEYWORDS.items():
-    #     if any(keyword in file_name_lower for keyword in keywords):
-    #         logger.info(f"Auto-labeled document as {doc_type} based on filename")
-    #         return doc_type
-    
-    # Default to OTHER if no label can be determined
+    if len(path_parts) > 2:
+        subfolder = path_parts[1].replace(' ', '_')
+        if subfolder in ALLOWED_DOCUMENT_LABELS:
+            logger.info(f"Auto-labeled document as {subfolder} based on subfolder")
+            return subfolder
+        else:
+            logger.info(f"Subfolder '{subfolder}' not in allowed labels, labeled as OTHER")
     logger.info("Could not determine document type, labeled as OTHER")
     return 'OTHER'
 

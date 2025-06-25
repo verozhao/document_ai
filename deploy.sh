@@ -212,14 +212,7 @@ config_data = {
     'min_accuracy_for_deployment': $MIN_ACCURACY_DEPLOYMENT,
     'check_interval_minutes': 60,
     'auto_deploy': True,
-    'document_types': [
-        'CAPITAL_CALL',
-        'DISTRIBUTION_NOTICE',
-        'FINANCIAL_STATEMENT',
-        'PORTFOLIO_SUMMARY',
-        'TAX',
-        'OTHER'
-    ],
+    
     'created_at': datetime.now(timezone.utc),
     'updated_at': datetime.now(timezone.utc)
 }
