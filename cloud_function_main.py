@@ -185,8 +185,8 @@ def auto_label_document(file_name: str, gcs_uri: str) -> str:
     path_parts = file_name.split('/')
     if len(path_parts) > 2:  # Check if file is in a subfolder
         subfolder = path_parts[1]  # Get the subfolder name
-        # Convert to uppercase and replace spaces with underscores
-        label = subfolder.upper().replace(' ', '_')
+        # Use exact folder name, just replace spaces with underscores
+        label = subfolder.replace(' ', '_')
         logger.info(f"Auto-labeled document as {label} based on subfolder")
         return label
     
