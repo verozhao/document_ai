@@ -40,14 +40,15 @@ workflow_execution_client = executions_v1.ExecutionsClient()
 opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
 docai_client = documentai.DocumentProcessorServiceClient(client_options=opts)
 
-# Document type keywords for auto-labeling (lowercase to match folder names)
-DOCUMENT_TYPE_KEYWORDS = {
-    'capital_call': ['capital call', 'drawdown', 'commitment', 'capital contribution'],
-    'distribution_notice': ['distribution', 'proceeds', 'realized', 'dividend'],
-    'financial_statement': ['balance sheet', 'income statement', 'financial statement', 'profit loss'],
-    'portfolio_summary': ['portfolio', 'holdings', 'investments', 'asset allocation'],
-    'tax': ['tax', 'k-1', 'schedule k', '1099', '1040'],
-}
+# The following serves as a fallback for auto-labeling. It is not used in the current implementation.
+# If the file is not in a subfolder (e.g., just documents/doc1.pdf), the function then tries to infer the label from the filename itself by searching for keywords defined in DOCUMENT_TYPE_KEYWORDS.
+# DOCUMENT_TYPE_KEYWORDS = {
+#     'capital_call': ['capital call', 'drawdown', 'commitment', 'capital contribution'],
+#     'distribution_notice': ['distribution', 'proceeds', 'realized', 'dividend'],
+#     'financial_statement': ['balance sheet', 'income statement', 'financial statement', 'profit loss'],
+#     'portfolio_summary': ['portfolio', 'holdings', 'investments', 'asset allocation'],
+#     'tax': ['tax', 'k-1', 'schedule k', '1099', '1040'],
+# }
 
 
 def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -184,10 +185,9 @@ def process_document_upload(event: Dict[str, Any], context: Any) -> Dict[str, An
 def auto_label_document(file_name: str, gcs_uri: str) -> str:
     """
     Auto-label document based on subfolder name.
-    The subfolder name is used as the document label.
+    The subfolder name is used as the document label. If no subfolder, returns 'OTHER'.
     """
     # Extract subfolder name from the file path
-    # Example: documents/CAPITAL_CALL/doc1.pdf -> CAPITAL_CALL
     path_parts = file_name.split('/')
     if len(path_parts) > 2:  # Check if file is in a subfolder
         subfolder = path_parts[1]  # Get the subfolder name
@@ -196,12 +196,12 @@ def auto_label_document(file_name: str, gcs_uri: str) -> str:
         logger.info(f"Auto-labeled document as {label} based on subfolder")
         return label
     
-    # If no subfolder found, try to determine from filename
-    file_name_lower = file_name.lower()
-    for doc_type, keywords in DOCUMENT_TYPE_KEYWORDS.items():
-        if any(keyword in file_name_lower for keyword in keywords):
-            logger.info(f"Auto-labeled document as {doc_type} based on filename")
-            return doc_type
+    # # If no subfolder found, try to determine from filename
+    # file_name_lower = file_name.lower()
+    # for doc_type, keywords in DOCUMENT_TYPE_KEYWORDS.items():
+    #     if any(keyword in file_name_lower for keyword in keywords):
+    #         logger.info(f"Auto-labeled document as {doc_type} based on filename")
+    #         return doc_type
     
     # Default to OTHER if no label can be determined
     logger.info("Could not determine document type, labeled as OTHER")
@@ -333,17 +333,21 @@ def check_training_conditions() -> Tuple[bool, str]:
             logger.info("Active training already in progress")
             return False, ''
             
-        # Check for recent workflow triggers (within last 2 minutes) to prevent quota exhaustion
-        recent_threshold = datetime.now(timezone.utc).timestamp() - 120  # 2 minutes ago
-        recent_workflows = db.collection('workflow_triggers').where(
-            'processor_id', '==', PROCESSOR_ID
-        ).where(
-            'triggered_at', '>', recent_threshold
-        ).limit(1).get()
-        
-        if recent_workflows:
-            logger.info("Recent workflow execution detected, waiting to prevent quota exhaustion")
-            return False, ''
+        # Temporarily disabled: Check for recent workflow triggers (within last 2 minutes) to prevent quota exhaustion
+        # Note: Index creation in progress, will re-enable once index is ready
+        # recent_threshold = datetime.now(timezone.utc).timestamp() - 120  # 2 minutes ago
+        # try:
+        #     recent_workflows = db.collection('workflow_triggers').where(
+        #         'processor_id', '==', PROCESSOR_ID
+        #     ).where(
+        #         'triggered_at', '>', recent_threshold
+        #     ).limit(1).get()
+        #     
+        #     if recent_workflows:
+        #         logger.info("Recent workflow execution detected, waiting to prevent quota exhaustion")
+        #         return False, ''
+        # except Exception as e:
+        #     logger.warning(f"Workflow trigger check failed (index building?): {str(e)}")
         
         # Count documents by status with proper labels
         pending_initial_query = db.collection('processed_documents').where(
@@ -423,7 +427,7 @@ def create_labeled_document_json(doc_data: Dict[str, Any]) -> Optional[Dict]:
         
         # Check file size (OCR processor has limits)
         blob_size = blob.size
-        if blob_size > 20 * 1024 * 1024:  # 20MB limit
+        if blob_size and blob_size > 20 * 1024 * 1024:  # 20MB limit
             logger.warning(f"Document too large ({blob_size} bytes), using filename-based labeling only")
             return {
                 "mimeType": "application/pdf",
@@ -618,14 +622,15 @@ def organize_training_documents(training_type: str) -> str:
 def trigger_training_workflow(training_type: str):
     """Trigger the training workflow."""
     try:
-        # Record workflow trigger to prevent concurrent executions
-        trigger_record = {
-            'processor_id': PROCESSOR_ID,
-            'training_type': training_type,
-            'triggered_at': datetime.now(timezone.utc).timestamp(),
-            'status': 'triggering'
-        }
-        db.collection('workflow_triggers').add(trigger_record)
+        # Temporarily disabled: Record workflow trigger to prevent concurrent executions
+        # Note: Index creation in progress, will re-enable once index is ready
+        # trigger_record = {
+        #     'processor_id': PROCESSOR_ID,
+        #     'training_type': training_type,
+        #     'triggered_at': datetime.now(timezone.utc).timestamp(),
+        #     'status': 'triggering'
+        # }
+        # db.collection('workflow_triggers').add(trigger_record)
         
         # First organize documents in GCS
         training_prefix = organize_training_documents(training_type)

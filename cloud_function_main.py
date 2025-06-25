@@ -333,17 +333,21 @@ def check_training_conditions() -> Tuple[bool, str]:
             logger.info("Active training already in progress")
             return False, ''
             
-        # Check for recent workflow triggers (within last 2 minutes) to prevent quota exhaustion
-        recent_threshold = datetime.now(timezone.utc).timestamp() - 120  # 2 minutes ago
-        recent_workflows = db.collection('workflow_triggers').where(
-            'processor_id', '==', PROCESSOR_ID
-        ).where(
-            'triggered_at', '>', recent_threshold
-        ).limit(1).get()
-        
-        if recent_workflows:
-            logger.info("Recent workflow execution detected, waiting to prevent quota exhaustion")
-            return False, ''
+        # Temporarily disabled: Check for recent workflow triggers (within last 2 minutes) to prevent quota exhaustion
+        # Note: Index creation in progress, will re-enable once index is ready
+        # recent_threshold = datetime.now(timezone.utc).timestamp() - 120  # 2 minutes ago
+        # try:
+        #     recent_workflows = db.collection('workflow_triggers').where(
+        #         'processor_id', '==', PROCESSOR_ID
+        #     ).where(
+        #         'triggered_at', '>', recent_threshold
+        #     ).limit(1).get()
+        #     
+        #     if recent_workflows:
+        #         logger.info("Recent workflow execution detected, waiting to prevent quota exhaustion")
+        #         return False, ''
+        # except Exception as e:
+        #     logger.warning(f"Workflow trigger check failed (index building?): {str(e)}")
         
         # Count documents by status with proper labels
         pending_initial_query = db.collection('processed_documents').where(
@@ -423,7 +427,7 @@ def create_labeled_document_json(doc_data: Dict[str, Any]) -> Optional[Dict]:
         
         # Check file size (OCR processor has limits)
         blob_size = blob.size
-        if blob_size > 20 * 1024 * 1024:  # 20MB limit
+        if blob_size and blob_size > 20 * 1024 * 1024:  # 20MB limit
             logger.warning(f"Document too large ({blob_size} bytes), using filename-based labeling only")
             return {
                 "mimeType": "application/pdf",
@@ -618,14 +622,15 @@ def organize_training_documents(training_type: str) -> str:
 def trigger_training_workflow(training_type: str):
     """Trigger the training workflow."""
     try:
-        # Record workflow trigger to prevent concurrent executions
-        trigger_record = {
-            'processor_id': PROCESSOR_ID,
-            'training_type': training_type,
-            'triggered_at': datetime.now(timezone.utc).timestamp(),
-            'status': 'triggering'
-        }
-        db.collection('workflow_triggers').add(trigger_record)
+        # Temporarily disabled: Record workflow trigger to prevent concurrent executions
+        # Note: Index creation in progress, will re-enable once index is ready
+        # trigger_record = {
+        #     'processor_id': PROCESSOR_ID,
+        #     'training_type': training_type,
+        #     'triggered_at': datetime.now(timezone.utc).timestamp(),
+        #     'status': 'triggering'
+        # }
+        # db.collection('workflow_triggers').add(trigger_record)
         
         # First organize documents in GCS
         training_prefix = organize_training_documents(training_type)
