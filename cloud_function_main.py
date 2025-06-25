@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 # Environment variables
 PROJECT_ID = os.environ.get('GCP_PROJECT_ID')
 PROCESSOR_ID = os.environ.get('DOCUMENT_AI_PROCESSOR_ID')
+OCR_PROCESSOR_ID = os.environ.get('OCR_PROCESSOR_ID', '2369784b09e9d56a')  # OCR processor for text extraction
 LOCATION = os.environ.get('DOCUMENT_AI_LOCATION', 'us')
-WORKFLOW_NAME = os.environ.get('WORKFLOW_NAME', 'workflow-1-veronica')
+WORKFLOW_NAME = os.environ.get('WORKFLOW_NAME', 'automation-workflow')
 WORKFLOW_LOCATION = 'us-central1'
 BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME', 'document-ai-test-veronica')
 
@@ -331,8 +332,6 @@ def check_training_conditions() -> Tuple[bool, str]:
             'processor_id', '==', PROCESSOR_ID
         ).where(
             'status', '==', 'pending_initial_training'
-        ).where(
-            'document_label', '!=', None  # Must have a label
         )
         
         unused_completed_query = db.collection('processed_documents').where(
@@ -341,12 +340,14 @@ def check_training_conditions() -> Tuple[bool, str]:
             'status', '==', 'completed'
         ).where(
             'used_for_training', '==', False
-        ).where(
-            'document_label', '!=', None  # Must have a label
         )
         
-        pending_initial = list(pending_initial_query.get())
-        unused_completed = list(unused_completed_query.get())
+        pending_initial_docs = list(pending_initial_query.get())
+        unused_completed_docs = list(unused_completed_query.get())
+        
+        # Filter out documents without labels
+        pending_initial = [doc for doc in pending_initial_docs if doc.to_dict().get('document_label')]
+        unused_completed = [doc for doc in unused_completed_docs if doc.to_dict().get('document_label')]
         
         pending_count = len(pending_initial)
         unused_count = len(unused_completed)
@@ -387,9 +388,147 @@ def check_training_conditions() -> Tuple[bool, str]:
         return False, ''
 
 
+def create_labeled_document_json(doc_data: Dict[str, Any]) -> Optional[Dict]:
+    """Create a labeled document in Document AI JSON format"""
+    try:
+        source_gcs_uri = doc_data.get('gcs_uri')
+        doc_label = doc_data.get('document_label')
+        
+        if not source_gcs_uri or not doc_label:
+            return None
+            
+        # Process document with OCR processor for text extraction
+        request = documentai.ProcessRequest(
+            name=f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{OCR_PROCESSOR_ID}",
+            gcs_document=documentai.GcsDocument(
+                gcs_uri=source_gcs_uri,
+                mime_type="application/pdf"
+            )
+        )
+        
+        # Use OCR processor to get document text and structure
+        ocr_processor_path = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{OCR_PROCESSOR_ID}"
+        ocr_client = documentai.DocumentProcessorServiceClient(
+            client_options=ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
+        )
+        
+        result = ocr_client.process_document(request=request)
+        
+        if not result.document:
+            return None
+            
+        doc = result.document
+        
+        # Create labeled document with proper entities
+        labeled_doc = {
+            "mimeType": "application/pdf",
+            "text": doc.text if doc.text else "",
+            "pages": [
+                {
+                    "pageNumber": page.page_number,
+                    "dimension": {
+                        "width": page.dimension.width,
+                        "height": page.dimension.height,
+                        "unit": page.dimension.unit
+                    } if page.dimension else {}
+                } for page in doc.pages
+            ],
+            "uri": source_gcs_uri,
+            "entities": [
+                {
+                    "type": doc_label,
+                    "mentionText": doc_label,
+                    "confidence": 1.0,
+                    "textAnchor": {
+                        "textSegments": [
+                            {
+                                "startIndex": 0,
+                                "endIndex": len(doc_label)
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        
+        return labeled_doc
+        
+    except Exception as e:
+        logger.error(f"Error creating labeled document: {str(e)}")
+        return None
+
+
+def organize_training_documents(training_type: str) -> str:
+    """
+    Create properly labeled JSON documents for training.
+    Returns the GCS prefix for training documents.
+    """
+    try:
+        training_prefix = f"final_labeled_documents"
+        
+        # Query Firestore for training documents
+        query = db.collection('processed_documents').where(
+            'processor_id', '==', PROCESSOR_ID
+        ).where(
+            'status', '==', 'pending_initial_training' if training_type == 'initial' else 'completed'
+        ).where(
+            'used_for_training', '==', False
+        ).where(
+            'document_label', '>', ''
+        ).limit(50)  # Limit to prevent timeout
+        
+        docs = list(query.get())
+        logger.info(f"Found {len(docs)} documents to create labeled training data")
+        
+        bucket = storage_client.bucket(BUCKET_NAME)
+        processed_count = 0
+        
+        for doc in docs:
+            doc_data = doc.to_dict()
+            doc_label = doc_data.get('document_label')
+            
+            if not doc_label:
+                continue
+                
+            # Create labeled JSON document
+            labeled_doc = create_labeled_document_json(doc_data)
+            if labeled_doc:
+                # Create JSON file path
+                doc_id = doc.id
+                json_filename = f"{doc_id}.json"
+                json_path = f"{training_prefix}/{doc_label}/{json_filename}"
+                
+                # Upload labeled JSON document
+                blob = bucket.blob(json_path)
+                blob.upload_from_string(
+                    json.dumps(labeled_doc),
+                    content_type='application/json'
+                )
+                
+                logger.info(f"Created labeled document: {json_path}")
+                processed_count += 1
+                
+                # Limit processing to prevent timeout
+                if processed_count >= 20:
+                    logger.info(f"Processed {processed_count} documents, stopping to prevent timeout")
+                    break
+        
+        training_gcs_prefix = f"gs://{BUCKET_NAME}/{training_prefix}/"
+        logger.info(f"Created {processed_count} labeled documents in: {training_gcs_prefix}")
+        
+        return training_gcs_prefix
+        
+    except Exception as e:
+        logger.error(f"Error organizing training documents: {str(e)}", exc_info=True)
+        raise
+
+
 def trigger_training_workflow(training_type: str):
     """Trigger the training workflow."""
     try:
+        # First organize documents in GCS
+        training_prefix = organize_training_documents(training_type)
+        
         parent = f"projects/{PROJECT_ID}/locations/{WORKFLOW_LOCATION}/workflows/{WORKFLOW_NAME}"
         
         # Create execution request
@@ -399,7 +538,8 @@ def trigger_training_workflow(training_type: str):
                 'training_type': training_type,
                 'triggered_at': datetime.now(timezone.utc).isoformat(),
                 'bucket_name': BUCKET_NAME,
-                'location': LOCATION
+                'location': LOCATION,
+                'training_gcs_prefix': training_prefix
             })
         )
         

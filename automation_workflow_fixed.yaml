@@ -1,0 +1,177 @@
+# Document AI Automation Workflow - Fixed Version
+# Uses Firestore to get training documents instead of GCS prefix
+
+main:
+  params: [input]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - processor_id: ${input.processor_id}
+          - training_type: ${default(input.training_type, "incremental")}
+          - location: ${default(input.location, "us")}
+          - bucket_name: ${default(input.bucket_name, "document-ai-test-veronica")}
+          - processor_path: ${"projects/" + project_id + "/locations/" + location + "/processors/" + processor_id}
+          - start_time: ${sys.now()}
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Starting Document AI automation - " + training_type + " training for processor " + processor_id}'
+          severity: "INFO"
+
+    # Step 1: Query Firestore for training documents
+    - get_training_documents:
+        call: http.post
+        args:
+          url: ${"https://firestore.googleapis.com/v1/projects/" + project_id + "/databases/(default)/documents:runQuery"}
+          auth:
+            type: OAuth2
+          body:
+            structuredQuery:
+              from:
+                - collectionId: "processed_documents"
+              where:
+                compositeFilter:
+                  op: "AND"
+                  filters:
+                    - fieldFilter:
+                        field:
+                          fieldPath: "processor_id"
+                        op: "EQUAL"
+                        value:
+                          stringValue: ${processor_id}
+                    - fieldFilter:
+                        field:
+                          fieldPath: "status"
+                        op: "EQUAL"
+                        value:
+                          stringValue: ${if(training_type == "initial", "pending_initial_training", "completed")}
+                    - fieldFilter:
+                        field:
+                          fieldPath: "used_for_training"
+                        op: "EQUAL"
+                        value:
+                          booleanValue: false
+                    - fieldFilter:
+                        field:
+                          fieldPath: "document_label"
+                        op: "GREATER_THAN"
+                        value:
+                          stringValue: ""
+              limit: 100
+        result: query_result
+
+    - check_documents_found:
+        switch:
+          - condition: ${query_result.body == null or len(query_result.body) == 0}
+            steps:
+              - log_no_documents:
+                  call: sys.log
+                  args:
+                    text: "No documents found for training"
+                    severity: "WARNING"
+              - return_no_docs:
+                  return:
+                    status: "no_documents"
+                    message: "No documents available for training"
+
+    - process_documents:
+        assign:
+          - training_documents: []
+
+    - build_training_list:
+        for:
+          value: result_item
+          in: ${query_result.body}
+          steps:
+            - extract_document_info:
+                switch:
+                  - condition: ${result_item.document != null and result_item.document.fields != null}
+                    steps:
+                      - get_fields:
+                          assign:
+                            - doc_fields: ${result_item.document.fields}
+                            - gcs_uri: ${doc_fields.gcs_uri.stringValue}
+                            - doc_label: ${doc_fields.document_label.stringValue}
+                            - training_doc:
+                                gcsUri: ${gcs_uri}
+                                mimeType: "application/pdf"
+                      - add_to_list:
+                          assign:
+                            - training_documents: ${list.concat(training_documents, [training_doc])}
+
+    - log_document_count:
+        call: sys.log
+        args:
+          text: '${"Found " + string(len(training_documents)) + " documents for training"}'
+          severity: "INFO"
+
+    # Step 2: Start training with document list
+    - start_training:
+        call: http.post
+        args:
+          url: ${"https://" + location + "-documentai.googleapis.com/v1/" + processor_path + "/processorVersions:train"}
+          auth:
+            type: OAuth2
+          body:
+            processorVersion:
+              displayName: '${"auto-training-" + string(sys.now())}'
+            inputData:
+              trainingDocuments:
+                gcsDocuments:
+                  documents: ${training_documents}
+        result: training_operation
+
+    - log_training_started:
+        call: sys.log
+        args:
+          text: '${"Training operation started: " + training_operation.body.name}'
+          severity: "INFO"
+
+    # Step 3: Update Firestore with operation status
+    - update_training_status:
+        call: http.patch
+        args:
+          url: ${"https://firestore.googleapis.com/v1/projects/" + project_id + "/databases/(default)/documents/training_batches/" + processor_id}
+          auth:
+            type: OAuth2
+          body:
+            fields:
+              processor_id:
+                stringValue: ${processor_id}
+              training_operation:
+                stringValue: ${training_operation.body.name}
+              status:
+                stringValue: "training"
+              document_count:
+                integerValue: ${len(training_documents)}
+              started_at:
+                timestampValue: ${time.format(start_time)}
+
+    - log_completion:
+        call: sys.log
+        args:
+          text: '${"Training started successfully with " + string(len(training_documents)) + " documents"}'
+          severity: "INFO"
+
+    # Update Firestore to mark training as completed
+    - mark_training_completed:
+        call: http.patch
+        args:
+          url: ${"https://firestore.googleapis.com/v1/projects/" + project_id + "/databases/(default)/documents/training_batches/" + processor_id + "?updateMask.fieldPaths=status&updateMask.fieldPaths=completed_at"}
+          auth:
+            type: OAuth2
+          body:
+            fields:
+              status:
+                stringValue: "completed"
+              completed_at:
+                timestampValue: ${time.format(sys.now())}
+
+    # Return operation details
+    - return_result:
+        return:
+          training_operation: ${training_operation.body.name}
+          document_count: ${len(training_documents)}
+          status: "success"

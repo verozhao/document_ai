@@ -15,7 +15,7 @@ FUNCTION_LOCATION="us-central1"
 APP_ENGINE_LOCATION="us-central"
 BUCKET_NAME="${GCS_BUCKET_NAME:-document-ai-test-veronica}"
 FUNCTION_NAME="document-ai-service"  # Your existing function name
-WORKFLOW_NAME="workflow-1-veronica"
+WORKFLOW_NAME="automation-workflow"
 SCHEDULER_JOB_NAME="document-ai-training-scheduler"
 
 # Use your existing service account (NOT creating a new one)
@@ -86,7 +86,7 @@ check_prerequisites() {
     fi
     
     # Check required files
-    local required_files=("main.py" "requirements.txt" "training-workflow.yaml")
+    local required_files=("cloud_function_main.py" "requirements.txt" "automation_workflow.yaml")
     for file in "${required_files[@]}"; do
         if [ ! -f "$file" ]; then
             print_error "Required file not found: $file"
@@ -94,14 +94,8 @@ check_prerequisites() {
         fi
     done
     
-    # Verify service account exists
-    if ! gcloud iam service-accounts describe $SERVICE_ACCOUNT --project=$PROJECT_ID &> /dev/null; then
-        print_error "Service account not found: $SERVICE_ACCOUNT"
-        print_info "Please ensure the service account exists with proper permissions"
-        ((errors++))
-    else
-        print_status "Service account verified: $SERVICE_ACCOUNT"
-    fi
+    # Service account will be created during deployment if it doesn't exist
+    print_info "Service account will be created/verified during deployment: $SERVICE_ACCOUNT"
     
     if [ $errors -gt 0 ]; then
         print_error "Prerequisites check failed with $errors errors"
@@ -258,7 +252,7 @@ deploy_cloud_function() {
     
     # Create deployment directory with clean structure
     DEPLOY_DIR=$(mktemp -d)
-    cp main.py $DEPLOY_DIR/
+    cp cloud_function_main.py $DEPLOY_DIR/main.py
     cp requirements.txt $DEPLOY_DIR/
     
     # Ensure requirements.txt has all dependencies
@@ -299,7 +293,7 @@ deploy_workflow() {
     
     # Deploy workflow using the custom service account
     gcloud workflows deploy $WORKFLOW_NAME \
-        --source=training-workflow.yaml \
+        --source=automation_workflow.yaml \
         --location=$CLOUD_LOCATION \
         --service-account=$SERVICE_ACCOUNT
     

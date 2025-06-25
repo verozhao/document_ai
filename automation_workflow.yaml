@@ -1,0 +1,136 @@
+# Document AI Automation Workflow - Final Version
+# Uses GCS prefix provided by Cloud Function after document organization
+
+main:
+  params: [input]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - processor_id: ${input.processor_id}
+          - training_type: ${default(input.training_type, "incremental")}
+          - location: ${default(input.location, "us")}
+          - bucket_name: ${default(input.bucket_name, "document-ai-test-veronica")}
+          - training_gcs_prefix: ${default(input.training_gcs_prefix, "gs://" + bucket_name + "/working_labeled_documents/")}
+          - processor_path: ${"projects/" + project_id + "/locations/" + location + "/processors/" + processor_id}
+          - start_time: ${sys.now()}
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Starting Document AI automation - " + training_type + " training for processor " + processor_id + " using prefix: " + training_gcs_prefix}'
+          severity: "INFO"
+
+    # Step 1: Import labeled documents with auto-split
+    - import_documents:
+        call: http.post
+        args:
+          url: ${"https://" + location + "-documentai.googleapis.com/v1beta3/" + processor_path + "/dataset:importDocuments"}
+          auth:
+            type: OAuth2
+          body:
+            batchDocumentsImportConfigs:
+              - batchInputConfig:
+                  gcsPrefix:
+                    gcsUriPrefix: ${training_gcs_prefix}
+                autoSplitConfig:
+                  trainingSplitRatio: 0.8
+        result: import_operation
+
+    - log_import_started:
+        call: sys.log
+        args:
+          text: '${"Import operation started: " + json.encode_to_string(import_operation)}'
+          severity: "INFO"
+
+    # Step 2: Monitor import completion
+    - wait_for_import:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    - check_import_status:
+        call: http.get
+        args:
+          url: ${"https://" + location + "-documentai.googleapis.com/v1/" + import_operation.body.name}
+          auth:
+            type: OAuth2
+        result: import_status
+
+    - import_completion_check:
+        switch:
+          - condition: ${import_status.body.done == true}
+            next: start_training
+          - condition: ${import_status.body.done != true}
+            next: continue_import_wait
+
+    - continue_import_wait:
+        call: sys.sleep
+        args:
+          seconds: 60
+        next: check_import_status
+
+    # Step 3: Start training
+    - start_training:
+        call: http.post
+        args:
+          url: ${"https://" + location + "-documentai.googleapis.com/v1/" + processor_path + "/processorVersions:train"}
+          auth:
+            type: OAuth2
+          body:
+            processorVersion:
+              displayName: '${"auto-training-" + string(sys.now())}'
+        result: training_operation
+
+    - log_training_started:
+        call: sys.log
+        args:
+          text: '${"Training operation started: " + training_operation.body.name}'
+          severity: "INFO"
+
+    # Step 4: Update Firestore with operation status
+    - update_training_status:
+        call: http.patch
+        args:
+          url: ${"https://firestore.googleapis.com/v1/projects/" + project_id + "/databases/(default)/documents/training_batches/" + processor_id}
+          auth:
+            type: OAuth2
+          body:
+            fields:
+              processor_id:
+                stringValue: ${processor_id}
+              training_operation:
+                stringValue: ${training_operation.body.name}
+              status:
+                stringValue: "training"
+              training_gcs_prefix:
+                stringValue: ${training_gcs_prefix}
+              started_at:
+                timestampValue: ${time.format(start_time)}
+
+    - log_completion:
+        call: sys.log
+        args:
+          text: '${"Training started successfully using documents from: " + training_gcs_prefix}'
+          severity: "INFO"
+
+    # Update Firestore to mark training as completed
+    - mark_training_completed:
+        call: http.patch
+        args:
+          url: ${"https://firestore.googleapis.com/v1/projects/" + project_id + "/databases/(default)/documents/training_batches/" + processor_id + "?updateMask.fieldPaths=status&updateMask.fieldPaths=completed_at"}
+          auth:
+            type: OAuth2
+          body:
+            fields:
+              status:
+                stringValue: "completed"
+              completed_at:
+                timestampValue: ${time.format(sys.now())}
+
+    # Return operation details
+    - return_result:
+        return:
+          training_operation: ${training_operation.body.name}
+          training_gcs_prefix: ${training_gcs_prefix}
+          status: "success"
