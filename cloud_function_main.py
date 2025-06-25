@@ -188,7 +188,6 @@ def auto_label_document(file_name: str, gcs_uri: str) -> str:
     The subfolder name is used as the document label. If no subfolder, returns 'OTHER'.
     """
     # Extract subfolder name from the file path
-    # Example: documents/CAPITAL_CALL/doc1.pdf -> CAPITAL_CALL
     path_parts = file_name.split('/')
     if len(path_parts) > 2:  # Check if file is in a subfolder
         subfolder = path_parts[1]  # Get the subfolder name
