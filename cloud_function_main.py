@@ -40,7 +40,8 @@ workflow_execution_client = executions_v1.ExecutionsClient()
 opts = ClientOptions(api_endpoint=f"{LOCATION}-documentai.googleapis.com")
 docai_client = documentai.DocumentProcessorServiceClient(client_options=opts)
 
-# Document type keywords for auto-labeling (lowercase to match folder names)
+# The following serves as a fallback for auto-labeling. It is not used in the current implementation.
+# If the file is not in a subfolder (e.g., just documents/doc1.pdf), the function then tries to infer the label from the filename itself by searching for keywords defined in DOCUMENT_TYPE_KEYWORDS.
 # DOCUMENT_TYPE_KEYWORDS = {
 #     'capital_call': ['capital call', 'drawdown', 'commitment', 'capital contribution'],
 #     'distribution_notice': ['distribution', 'proceeds', 'realized', 'dividend'],
